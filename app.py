@@ -136,10 +136,25 @@ def create_app() -> FastAPI:
     async def health() -> Dict[str, Any]:
         try:
             kb_status = "loaded" if kb_text_cache else "not_found"
+            gemini_configured = bool(os.getenv("GEMINI_API_KEY"))
+            
+            # 測試 Gemini API 連線（如果已配置）
+            gemini_test_result = "not_configured"
+            if gemini_configured:
+                try:
+                    model = genai.GenerativeModel(model_name)
+                    # 簡單測試呼叫
+                    response = model.generate_content("test", request_options={"timeout": 5})
+                    gemini_test_result = "working" if response else "failed"
+                except Exception as e:
+                    gemini_test_result = f"error: {str(e)}"
+            
             return {
                 "status": "ok",
                 "kb_status": kb_status,
-                "gemini_configured": bool(os.getenv("GEMINI_API_KEY")),
+                "gemini_configured": gemini_configured,
+                "gemini_test": gemini_test_result,
+                "model_name": model_name,
                 "timestamp": str(datetime.now())
             }
         except Exception as e:
