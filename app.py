@@ -34,6 +34,7 @@ def resolve_kb_path() -> Optional[str]:
     # Try common relative locations
     here = os.path.dirname(os.path.abspath(__file__))
     candidates = [
+        os.path.abspath(os.path.join(here, "data", "kb.txt")),  # 當前目錄下的 data/kb.txt
         os.path.abspath(os.path.join(here, "..", "AI短影音智能體重製版", "data", "kb.txt")),
         os.path.abspath(os.path.join(here, "..", "data", "kb.txt")),
         os.path.abspath(os.path.join(here, "..", "..", "AI短影音智能體重製版", "data", "kb.txt")),
@@ -105,14 +106,20 @@ def create_app() -> FastAPI:
     app = FastAPI()
 
     # CORS for local file or dev servers
+    frontend_url = os.getenv("FRONTEND_URL")
+    cors_origins = [
+        "*",  # 允許所有來源（開發用）
+        "http://localhost:8080",  # 本地開發前端
+        "http://127.0.0.1:8080"   # 本地開發前端
+    ]
+    
+    # 如果有設定前端 URL，加入 CORS 來源
+    if frontend_url:
+        cors_origins.append(frontend_url)
+    
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "*",  # 允許所有來源（開發用）
-            "https://aivideonew.zeabur.app",  # 前端網域
-            "http://localhost:8080",  # 本地開發前端
-            "http://127.0.0.1:8080"   # 本地開發前端
-        ],
+        allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
