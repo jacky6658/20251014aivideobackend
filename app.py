@@ -214,9 +214,19 @@ def create_app() -> FastAPI:
 
 app = create_app()
 
+# 注意：在 Zeabur 部署時，使用 Dockerfile 中的 uvicorn 命令啟動
+# 這個區塊主要用於本地開發
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 3000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    print(f"INFO: Starting Uvicorn locally on host=0.0.0.0, port={port}")
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=port,
+        log_level="info",
+        access_log=True,
+        workers=1
+    )
 
 

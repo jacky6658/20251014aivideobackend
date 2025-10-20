@@ -17,5 +17,5 @@ RUN mkdir -p /app/data
 # 暴露端口
 EXPOSE 3000
 
-# 啟動命令
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "3000"]
+# 啟動命令 - 使用環境變數 PORT，預設為 3000
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-3000} --log-level info"]
