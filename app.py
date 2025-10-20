@@ -1,5 +1,6 @@
 import os
 import json
+from datetime import datetime
 from typing import List, Dict, Any, Optional, Iterable
 
 from fastapi import FastAPI, Request
@@ -127,9 +128,26 @@ def create_app() -> FastAPI:
 
     kb_text_cache = load_kb_text()
 
+    @app.get("/")
+    async def root():
+        return {"message": "AI Video Backend is running"}
+    
     @app.get("/api/health")
     async def health() -> Dict[str, Any]:
-        return {"status": "ok"}
+        try:
+            kb_status = "loaded" if kb_text_cache else "not_found"
+            return {
+                "status": "ok",
+                "kb_status": kb_status,
+                "gemini_configured": bool(os.getenv("GEMINI_API_KEY")),
+                "timestamp": str(datetime.now())
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": str(e),
+                "timestamp": str(datetime.now())
+            }
 
     @app.post("/api/chat/stream")
     async def stream_chat(body: ChatBody, request: Request):
