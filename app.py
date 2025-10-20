@@ -98,11 +98,14 @@ def create_app() -> FastAPI:
 
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
+        print("WARNING: GEMINI_API_KEY not found in environment variables")
         # Delay failure to request time but keep app creatable
-        pass
+    else:
+        print(f"INFO: GEMINI_API_KEY found, length: {len(api_key)}")
 
     genai.configure(api_key=api_key)
     model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    print(f"INFO: Using model: {model_name}")
 
     app = FastAPI()
 
@@ -210,5 +213,10 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 3000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 
