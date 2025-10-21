@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Optional, Iterable
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
+from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse, HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -1279,11 +1279,176 @@ def create_app() -> FastAPI:
         )
         return {"auth_url": auth_url}
 
-    @app.post("/api/auth/google/callback")
-    async def google_callback(request: dict):
-        """處理 Google OAuth 回調"""
+    @app.get("/api/auth/google/callback")
+    async def google_callback_get(code: str = None):
+        """處理 Google OAuth 回調（GET 請求 - 來自 Google 重定向）"""
         try:
-            # 從請求中獲取授權碼
+            # 從 URL 參數獲取授權碼
+            if not code:
+                raise HTTPException(status_code=400, detail="Missing authorization code")
+            
+            # 交換授權碼獲取訪問令牌
+            async with httpx.AsyncClient() as client:
+                token_response = await client.post(
+                    "https://oauth2.googleapis.com/token",
+                    data={
+                        "client_id": GOOGLE_CLIENT_ID,
+                        "client_secret": GOOGLE_CLIENT_SECRET,
+                        "code": code,
+                        "grant_type": "authorization_code",
+                        "redirect_uri": GOOGLE_REDIRECT_URI,
+                    }
+                )
+                
+                if token_response.status_code != 200:
+                    raise HTTPException(status_code=400, detail="Failed to get access token")
+                
+                token_data = token_response.json()
+                access_token = token_data["access_token"]
+                
+                # 獲取用戶資訊
+                google_user = await get_google_user_info(access_token)
+                if not google_user:
+                    raise HTTPException(status_code=400, detail="Failed to get user info")
+                
+                # 生成用戶 ID
+                user_id = generate_user_id(google_user.email)
+                
+                # 保存或更新用戶認證資訊
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    INSERT OR REPLACE INTO user_auth 
+                    (user_id, google_id, email, name, picture, access_token, expires_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (
+                    user_id,
+                    google_user.id,
+                    google_user.email,
+                    google_user.name,
+                    google_user.picture,
+                    access_token,
+                    datetime.now().timestamp() + token_data.get("expires_in", 3600)
+                ))
+                
+                conn.commit()
+                conn.close()
+                
+                # 生成應用程式訪問令牌
+                app_access_token = generate_access_token(user_id)
+                
+                # 返回一個 HTML 頁面，使用 postMessage 傳遞認證結果給父視窗
+                html_content = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>登入成功</title>
+                    <style>
+                        body {{
+                            font-family: Arial, sans-serif;
+                            display: flex;
+                            align-items: center;
+                            justify-content: center;
+                            height: 100vh;
+                            margin: 0;
+                            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        }}
+                        .container {{
+                            text-align: center;
+                            background: white;
+                            padding: 40px;
+                            border-radius: 12px;
+                            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+                        }}
+                        h2 {{ color: #27ae60; margin: 0 0 10px 0; }}
+                        p {{ color: #7f8c8d; margin: 0; }}
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <h2>✅ 登入成功！</h2>
+                        <p>視窗即將自動關閉...</p>
+                    </div>
+                    <script>
+                        // 將認證結果傳遞給父視窗
+                        if (window.opener) {{
+                            window.opener.postMessage({{
+                                type: 'GOOGLE_AUTH_SUCCESS',
+                                accessToken: '{app_access_token}',
+                                user: {{
+                                    id: '{google_user.id}',
+                                    email: '{google_user.email}',
+                                    name: '{google_user.name}',
+                                    picture: '{google_user.picture}'
+                                }}
+                            }}, '*');
+                            setTimeout(() => window.close(), 1000);
+                        }} else {{
+                            // 如果不是 popup，導向前端首頁並附帶 token
+                            window.location.href = 'https://aivideonew.zeabur.app/?token=' + '{app_access_token}';
+                        }}
+                    </script>
+                </body>
+                </html>
+                """
+                
+                return HTMLResponse(content=html_content)
+                
+        except Exception as e:
+            # 返回錯誤頁面
+            error_html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>登入失敗</title>
+                <style>
+                    body {{
+                        font-family: Arial, sans-serif;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        height: 100vh;
+                        margin: 0;
+                        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+                    }}
+                    .container {{
+                        text-align: center;
+                        background: white;
+                        padding: 40px;
+                        border-radius: 12px;
+                        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+                    }}
+                    h2 {{ color: #e74c3c; margin: 0 0 10px 0; }}
+                    p {{ color: #7f8c8d; margin: 0; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h2>❌ 登入失敗</h2>
+                    <p>{str(e)}</p>
+                </div>
+                <script>
+                    if (window.opener) {{
+                        window.opener.postMessage({{
+                            type: 'GOOGLE_AUTH_ERROR',
+                            error: '{str(e)}'
+                        }}, '*');
+                        setTimeout(() => window.close(), 3000);
+                    }}
+                </script>
+            </body>
+            </html>
+            """
+            
+            from fastapi.responses import HTMLResponse
+            return HTMLResponse(content=error_html, status_code=500)
+
+    @app.post("/api/auth/google/callback")
+    async def google_callback_post(request: dict):
+        """處理 Google OAuth 回調（POST 請求 - 來自前端 JavaScript）"""
+        try:
+            # 從請求體獲取授權碼
             code = request.get("code")
             if not code:
                 raise HTTPException(status_code=400, detail="Missing authorization code")
@@ -1339,6 +1504,7 @@ def create_app() -> FastAPI:
                 # 生成應用程式訪問令牌
                 app_access_token = generate_access_token(user_id)
                 
+                # 返回 JSON 格式（給前端 JavaScript 使用）
                 return AuthToken(
                     access_token=app_access_token,
                     expires_in=3600,
