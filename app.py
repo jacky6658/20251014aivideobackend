@@ -3,6 +3,7 @@ import json
 import hashlib
 import sqlite3
 import secrets
+import asyncio
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Iterable
 
@@ -230,7 +231,10 @@ def init_database():
 def get_db_connection():
     """獲取數據庫連接"""
     db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chatbot.db")
-    return sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
 
 
 def generate_dedup_hash(content: str, platform: str = None, topic: str = None) -> str:
@@ -1274,50 +1278,63 @@ def create_app() -> FastAPI:
     @app.post("/api/scripts/save")
     async def save_script(request: Request):
         """儲存腳本"""
-        try:
-            data = await request.json()
-            user_id = data.get("user_id")
-            content = data.get("content")
-            script_data = data.get("script_data", {})
-            platform = data.get("platform")
-            topic = data.get("topic")
-            profile = data.get("profile")
-            
-            if not user_id or not content:
-                return JSONResponse({"error": "缺少必要參數"}, status_code=400)
-            
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            
-            # 提取腳本標題作為預設名稱
-            script_name = script_data.get("title", "未命名腳本")
-            
-            # 插入腳本記錄
-            cursor.execute("""
-                INSERT INTO user_scripts (user_id, script_name, title, content, script_data, platform, topic, profile)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                user_id,
-                script_name,
-                script_data.get("title", ""),
-                content,
-                json.dumps(script_data),
-                platform,
-                topic,
-                profile
-            ))
-            
-            conn.commit()
-            script_id = cursor.lastrowid
-            conn.close()
-            
-            return {
-                "success": True,
-                "script_id": script_id,
-                "message": "腳本儲存成功"
-            }
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                data = await request.json()
+                user_id = data.get("user_id")
+                content = data.get("content")
+                script_data = data.get("script_data", {})
+                platform = data.get("platform")
+                topic = data.get("topic")
+                profile = data.get("profile")
+                
+                if not user_id or not content:
+                    return JSONResponse({"error": "缺少必要參數"}, status_code=400)
+                
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                
+                # 提取腳本標題作為預設名稱
+                script_name = script_data.get("title", "未命名腳本")
+                
+                # 插入腳本記錄
+                cursor.execute("""
+                    INSERT INTO user_scripts (user_id, script_name, title, content, script_data, platform, topic, profile)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    user_id,
+                    script_name,
+                    script_data.get("title", ""),
+                    content,
+                    json.dumps(script_data),
+                    platform,
+                    topic,
+                    profile
+                ))
+                
+                conn.commit()
+                script_id = cursor.lastrowid
+                conn.close()
+                
+                return {
+                    "success": True,
+                    "script_id": script_id,
+                    "message": "腳本儲存成功"
+                }
+            except sqlite3.OperationalError as e:
+                if "database is locked" in str(e) and retry_count < max_retries - 1:
+                    retry_count += 1
+                    await asyncio.sleep(0.1 * retry_count)  # 遞增延遲
+                    continue
+                else:
+                    return JSONResponse({"error": f"資料庫錯誤: {str(e)}"}, status_code=500)
+            except Exception as e:
+                return JSONResponse({"error": f"儲存失敗: {str(e)}"}, status_code=500)
+        
+        return JSONResponse({"error": "儲存失敗，請稍後再試"}, status_code=500)
     
     @app.get("/api/scripts/my")
     async def get_my_scripts(current_user_id: Optional[str] = Depends(get_current_user)):
