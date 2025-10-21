@@ -43,7 +43,7 @@ source venv/bin/activate
 pip install uvicorn fastapi google-generativeai python-dotenv
 
 # 5. 設定 API Key（替換成您的實際金鑰）
-export GEMINI_API_KEY="AIzaSyCNmsgpPxo6acx3TV1VrvMLWOvqqj38TR4"
+export GEMINI_API_KEY="your_gemini_api_key"
 
 # 6. 啟動服務
 python -m uvicorn app:app --host 127.0.0.1 --port 8000 --reload
