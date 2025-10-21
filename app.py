@@ -1296,6 +1296,12 @@ def create_app() -> FastAPI:
             f"scope=openid email profile&"
             f"access_type=offline"
         )
+        
+        # 除錯資訊
+        print(f"DEBUG: Generated auth URL: {auth_url}")
+        print(f"DEBUG: GOOGLE_CLIENT_ID: {GOOGLE_CLIENT_ID}")
+        print(f"DEBUG: GOOGLE_REDIRECT_URI: {GOOGLE_REDIRECT_URI}")
+        
         return {"auth_url": auth_url}
 
     @app.get("/api/auth/google/callback")
