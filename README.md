@@ -2,6 +2,27 @@
 
 ## ⚠️ 重要問題 - 優先解決
 
+### 🚨 腳本儲存系統問題
+
+**現象**：腳本儲存功能無法正常工作，出現 401 Unauthorized 錯誤
+
+#### 問題分析
+
+1. **API認證問題**：
+   - 腳本相關API需要用戶認證
+   - 前端認證token可能過期或無效
+   - 需要檢查 `get_current_user` 函數的實現
+
+2. **資料庫鎖定問題**：
+   - 偶爾出現 `database is locked` 錯誤
+   - 多個請求同時訪問SQLite資料庫
+   - 需要優化資料庫連接管理
+
+3. **影響範圍**：
+   - ❌ 腳本儲存功能
+   - ❌ 腳本載入功能
+   - ❌ 腳本管理功能（重命名、刪除）
+
 ### 🚨 用戶資料持久化問題
 
 **現象**：用戶反映「重新刷新登入後帳號定位不見了」
@@ -761,6 +782,173 @@ python app.py
 - **解決步驟**：提供可重現的修復步驟
 - **測試驗證**：記錄修復後的測試結果
 - **經驗提煉**：總結重要的技術經驗和最佳實踐
+
+---
+
+## 🆕 腳本儲存系統 (2025-10-21)
+
+### 📋 新增功能
+
+#### 1. 腳本儲存 API
+- **POST** `/api/scripts/save` - 儲存腳本
+- **GET** `/api/scripts/my` - 獲取用戶腳本列表
+- **PUT** `/api/scripts/{id}/name` - 更新腳本名稱
+- **DELETE** `/api/scripts/{id}` - 刪除腳本
+
+#### 2. 管理員 API
+- **GET** `/api/admin/users` - 獲取所有用戶資料
+- **GET** `/api/admin/user/{id}/data` - 獲取指定用戶完整資料
+- **GET** `/api/admin/statistics` - 獲取系統統計資料
+
+#### 3. 資料庫表格
+```sql
+CREATE TABLE user_scripts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    script_name TEXT,
+    title TEXT,
+    content TEXT NOT NULL,
+    script_data TEXT,
+    platform TEXT,
+    topic TEXT,
+    profile TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES user_profiles (user_id)
+);
+```
+
+### 🔧 技術實現
+
+#### 1. 資料庫連接優化
+```python
+def get_db_connection():
+    conn = sqlite3.connect(db_path, timeout=30.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+```
+
+#### 2. 腳本儲存重試機制
+```python
+max_retries = 3
+retry_count = 0
+while retry_count < max_retries:
+    try:
+        # 儲存邏輯
+        break
+    except sqlite3.OperationalError as e:
+        if "database is locked" in str(e):
+            retry_count += 1
+            await asyncio.sleep(0.1 * retry_count)
+```
+
+#### 3. 腳本數據結構
+```python
+script_data = {
+    "title": "腳本標題",
+    "overview": "腳本概覽",
+    "sections": [
+        {
+            "type": "Hook/Value/CTA",
+            "content": ["內容1", "內容2"]
+        }
+    ]
+}
+```
+
+### ⚠️ 已知問題
+
+#### 1. API認證問題
+- **現象**：401 Unauthorized 錯誤
+- **原因**：`get_current_user` 函數認證失敗
+- **影響**：腳本儲存、載入、管理功能無法使用
+
+#### 2. 資料庫鎖定問題
+- **現象**：`database is locked` 錯誤
+- **原因**：多個請求同時訪問SQLite
+- **影響**：偶爾導致操作失敗
+
+#### 3. 資料持久化問題
+- **現象**：Zeabur重新部署時資料遺失
+- **原因**：SQLite不適合生產環境
+- **影響**：所有用戶資料會遺失
+
+### 🎯 待修復項目
+
+1. **修復API認證**：
+   - 檢查 `get_current_user` 函數
+   - 確保JWT token正確解析
+   - 修復認證邏輯
+
+2. **優化資料庫連接**：
+   - 實現連接池
+   - 添加更好的鎖定處理
+   - 考慮升級到PostgreSQL
+
+3. **完善錯誤處理**：
+   - 添加更詳細的錯誤訊息
+   - 實現更好的重試機制
+   - 添加日誌記錄
+
+---
+
+## 🔧 2025-10-21 修復記錄
+
+### 腳本儲存系統修復
+
+#### 問題描述
+- 前端腳本儲存成功但「我的腳本」不顯示
+- 後端API認證問題導致 401 錯誤
+- 用戶無法查看已儲存的腳本
+
+#### 修復措施
+
+1. **前端本地儲存備案**：
+   - 添加 `localStorage` 作為後端API的備案機制
+   - 實現 `getLocalScripts()` 和 `saveScriptToLocal()` 函數
+   - 當後端API不可用時自動使用本地儲存
+
+2. **錯誤處理優化**：
+   - 401 認證錯誤：顯示登入提示
+   - 404 API不存在：自動使用本地儲存
+   - 網路錯誤：自動使用本地儲存
+
+3. **調試日誌增強**：
+   - 添加詳細的控制台日誌
+   - 便於問題排查和狀態追蹤
+
+#### 技術實現
+
+**前端修改**：
+```javascript
+// 優先載入本地腳本
+const localScripts = getLocalScripts();
+if (localScripts.length > 0) {
+  displayScripts(localScripts);
+  return;
+}
+
+// 雙重儲存機制
+if (response.ok) {
+  // 後端儲存成功，同時儲存到本地
+  saveScriptToLocal(localScriptData);
+} else if (response.status === 404) {
+  // API不存在，使用本地儲存
+  saveScriptToLocal(localScriptData);
+}
+```
+
+**後端狀態**：
+- 腳本儲存API已實現但需要重新部署
+- 資料庫連接已優化（WAL模式、重試機制）
+- 認證系統需要進一步調試
+
+#### 當前狀態
+- ✅ 前端腳本儲存功能正常（使用本地備案）
+- ✅ 腳本顯示功能正常
+- ⚠️ 後端API需要重新部署
+- ⚠️ 長期需要解決資料持久化問題
 
 ---
 
