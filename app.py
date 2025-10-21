@@ -80,10 +80,19 @@ class AuthToken(BaseModel):
     user: GoogleUser
 
 
+# 載入環境變數
+load_dotenv()
+
 # OAuth 配置（從環境變數讀取）
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 GOOGLE_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI", "http://localhost:5173/auth/callback")
+
+# 除錯資訊
+print(f"DEBUG: Environment variables loaded:")
+print(f"DEBUG: GOOGLE_CLIENT_ID: {GOOGLE_CLIENT_ID}")
+print(f"DEBUG: GOOGLE_CLIENT_SECRET: {GOOGLE_CLIENT_SECRET}")
+print(f"DEBUG: GOOGLE_REDIRECT_URI: {GOOGLE_REDIRECT_URI}")
 
 # JWT 密鑰（用於生成訪問令牌）
 JWT_SECRET = os.getenv("JWT_SECRET", secrets.token_urlsafe(32))
@@ -645,8 +654,6 @@ def build_system_prompt(kb_text: str, platform: Optional[str], profile: Optional
 
 
 def create_app() -> FastAPI:
-    load_dotenv()
-
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         print("WARNING: GEMINI_API_KEY not found in environment variables")
@@ -692,6 +699,18 @@ def create_app() -> FastAPI:
     async def root():
         return {"message": "AI Video Backend is running"}
     
+    @app.get("/api/debug/env")
+    async def debug_env():
+        """除錯環境變數"""
+        return {
+            "GOOGLE_CLIENT_ID": GOOGLE_CLIENT_ID,
+            "GOOGLE_CLIENT_SECRET": "***" if GOOGLE_CLIENT_SECRET else None,
+            "GOOGLE_REDIRECT_URI": GOOGLE_REDIRECT_URI,
+            "GEMINI_API_KEY": "***" if os.getenv("GEMINI_API_KEY") else None,
+            "GEMINI_MODEL": os.getenv("GEMINI_MODEL"),
+            "FRONTEND_URL": os.getenv("FRONTEND_URL")
+        }
+
     @app.get("/api/health")
     async def health() -> Dict[str, Any]:
         try:
@@ -1283,6 +1302,13 @@ def create_app() -> FastAPI:
     async def google_callback_get(code: str = None):
         """處理 Google OAuth 回調（GET 請求 - 來自 Google 重定向）"""
         try:
+            # 除錯資訊
+            print(f"DEBUG: OAuth callback received")
+            print(f"DEBUG: Code: {code}")
+            print(f"DEBUG: GOOGLE_CLIENT_ID: {GOOGLE_CLIENT_ID}")
+            print(f"DEBUG: GOOGLE_CLIENT_SECRET: {GOOGLE_CLIENT_SECRET}")
+            print(f"DEBUG: GOOGLE_REDIRECT_URI: {GOOGLE_REDIRECT_URI}")
+            
             # 從 URL 參數獲取授權碼
             if not code:
                 raise HTTPException(status_code=400, detail="Missing authorization code")
@@ -1441,7 +1467,6 @@ def create_app() -> FastAPI:
             </html>
             """
             
-            from fastapi.responses import HTMLResponse
             return HTMLResponse(content=error_html, status_code=500)
 
     @app.post("/api/auth/google/callback")
