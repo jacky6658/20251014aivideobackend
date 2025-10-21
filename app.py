@@ -204,6 +204,24 @@ def init_database():
         )
     """)
     
+    # 創建腳本儲存表
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_scripts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            script_name TEXT,
+            title TEXT,
+            content TEXT NOT NULL,
+            script_data TEXT,
+            platform TEXT,
+            topic TEXT,
+            profile TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES user_profiles (user_id)
+        )
+    """)
+    
     conn.commit()
     conn.close()
     return db_path
@@ -1251,6 +1269,163 @@ def create_app() -> FastAPI:
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    # ===== 腳本儲存功能 API =====
+    
+    @app.post("/api/scripts/save")
+    async def save_script(request: Request):
+        """儲存腳本"""
+        try:
+            data = await request.json()
+            user_id = data.get("user_id")
+            content = data.get("content")
+            script_data = data.get("script_data", {})
+            platform = data.get("platform")
+            topic = data.get("topic")
+            profile = data.get("profile")
+            
+            if not user_id or not content:
+                return JSONResponse({"error": "缺少必要參數"}, status_code=400)
+            
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # 提取腳本標題作為預設名稱
+            script_name = script_data.get("title", "未命名腳本")
+            
+            # 插入腳本記錄
+            cursor.execute("""
+                INSERT INTO user_scripts (user_id, script_name, title, content, script_data, platform, topic, profile)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                user_id,
+                script_name,
+                script_data.get("title", ""),
+                content,
+                json.dumps(script_data),
+                platform,
+                topic,
+                profile
+            ))
+            
+            conn.commit()
+            script_id = cursor.lastrowid
+            conn.close()
+            
+            return {
+                "success": True,
+                "script_id": script_id,
+                "message": "腳本儲存成功"
+            }
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.get("/api/scripts/my")
+    async def get_my_scripts(current_user_id: Optional[str] = Depends(get_current_user)):
+        """獲取用戶的腳本列表"""
+        if not current_user_id:
+            return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT id, script_name, title, content, script_data, platform, topic, profile, created_at, updated_at
+                FROM user_scripts
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+            """, (current_user_id,))
+            
+            scripts = []
+            for row in cursor.fetchall():
+                script_data = json.loads(row[4]) if row[4] else {}
+                scripts.append({
+                    "id": row[0],
+                    "name": row[1],
+                    "title": row[2],
+                    "content": row[3],
+                    "script_data": script_data,
+                    "platform": row[5],
+                    "topic": row[6],
+                    "profile": row[7],
+                    "created_at": row[8],
+                    "updated_at": row[9]
+                })
+            
+            conn.close()
+            return {"scripts": scripts}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.put("/api/scripts/{script_id}/name")
+    async def update_script_name(script_id: int, request: Request, current_user_id: Optional[str] = Depends(get_current_user)):
+        """更新腳本名稱"""
+        if not current_user_id:
+            return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        try:
+            data = await request.json()
+            new_name = data.get("name")
+            
+            if not new_name:
+                return JSONResponse({"error": "腳本名稱不能為空"}, status_code=400)
+            
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # 檢查腳本是否屬於當前用戶
+            cursor.execute("SELECT user_id FROM user_scripts WHERE id = ?", (script_id,))
+            result = cursor.fetchone()
+            
+            if not result:
+                return JSONResponse({"error": "腳本不存在"}, status_code=404)
+            
+            if result[0] != current_user_id:
+                return JSONResponse({"error": "無權限修改此腳本"}, status_code=403)
+            
+            # 更新腳本名稱
+            cursor.execute("""
+                UPDATE user_scripts 
+                SET script_name = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (new_name, script_id))
+            
+            conn.commit()
+            conn.close()
+            
+            return {"success": True, "message": "腳本名稱更新成功"}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.delete("/api/scripts/{script_id}")
+    async def delete_script(script_id: int, current_user_id: Optional[str] = Depends(get_current_user)):
+        """刪除腳本"""
+        if not current_user_id:
+            return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # 檢查腳本是否屬於當前用戶
+            cursor.execute("SELECT user_id FROM user_scripts WHERE id = ?", (script_id,))
+            result = cursor.fetchone()
+            
+            if not result:
+                return JSONResponse({"error": "腳本不存在"}, status_code=404)
+            
+            if result[0] != current_user_id:
+                return JSONResponse({"error": "無權限刪除此腳本"}, status_code=403)
+            
+            # 刪除腳本
+            cursor.execute("DELETE FROM user_scripts WHERE id = ?", (script_id,))
+            conn.commit()
+            conn.close()
+            
+            return {"success": True, "message": "腳本刪除成功"}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     @app.get("/api/user/behaviors/{user_id}")
     async def get_user_behaviors(user_id: str):
         """獲取用戶的行為統計"""
@@ -1278,6 +1453,259 @@ def create_app() -> FastAPI:
                         "last_activity": behavior[2]
                     } 
                     for behavior in behaviors
+                ]
+            }
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    # ===== 管理員 API（用於後台管理系統） =====
+    
+    @app.get("/api/admin/users")
+    async def get_all_users():
+        """獲取所有用戶資料（管理員用）"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # 獲取所有用戶基本資料
+            cursor.execute("""
+                SELECT ua.user_id, ua.google_id, ua.email, ua.name, ua.picture, 
+                       ua.created_at, up.preferred_platform, up.preferred_style, up.preferred_duration
+                FROM user_auth ua
+                LEFT JOIN user_profiles up ON ua.user_id = up.user_id
+                ORDER BY ua.created_at DESC
+            """)
+            
+            users = []
+            for row in cursor.fetchall():
+                users.append({
+                    "user_id": row[0],
+                    "google_id": row[1],
+                    "email": row[2],
+                    "name": row[3],
+                    "picture": row[4],
+                    "created_at": row[5],
+                    "preferred_platform": row[6],
+                    "preferred_style": row[7],
+                    "preferred_duration": row[8]
+                })
+            
+            conn.close()
+            return {"users": users}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.get("/api/admin/user/{user_id}/data")
+    async def get_user_complete_data(user_id: str):
+        """獲取指定用戶的完整資料（管理員用）"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # 用戶基本資料
+            cursor.execute("""
+                SELECT ua.google_id, ua.email, ua.name, ua.picture, ua.created_at,
+                       up.preferred_platform, up.preferred_style, up.preferred_duration, up.content_preferences
+                FROM user_auth ua
+                LEFT JOIN user_profiles up ON ua.user_id = up.user_id
+                WHERE ua.user_id = ?
+            """, (user_id,))
+            
+            user_data = cursor.fetchone()
+            if not user_data:
+                return JSONResponse({"error": "用戶不存在"}, status_code=404)
+            
+            # 帳號定位記錄
+            cursor.execute("""
+                SELECT id, record_number, content, created_at
+                FROM positioning_records
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+            """, (user_id,))
+            positioning_records = cursor.fetchall()
+            
+            # 腳本記錄
+            cursor.execute("""
+                SELECT id, script_name, title, content, script_data, platform, topic, profile, created_at
+                FROM user_scripts
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+            """, (user_id,))
+            script_records = cursor.fetchall()
+            
+            # 生成記錄
+            cursor.execute("""
+                SELECT id, content, platform, topic, created_at
+                FROM generations
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+            """, (user_id,))
+            generation_records = cursor.fetchall()
+            
+            # 對話摘要
+            cursor.execute("""
+                SELECT id, summary, conversation_type, created_at
+                FROM conversation_summaries
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+            """, (user_id,))
+            conversation_summaries = cursor.fetchall()
+            
+            # 用戶偏好
+            cursor.execute("""
+                SELECT preference_type, preference_value, confidence_score, created_at
+                FROM user_preferences
+                WHERE user_id = ?
+                ORDER BY confidence_score DESC
+            """, (user_id,))
+            user_preferences = cursor.fetchall()
+            
+            # 用戶行為
+            cursor.execute("""
+                SELECT behavior_type, behavior_data, created_at
+                FROM user_behaviors
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+            """, (user_id,))
+            user_behaviors = cursor.fetchall()
+            
+            conn.close()
+            
+            return {
+                "user_info": {
+                    "user_id": user_id,
+                    "google_id": user_data[0],
+                    "email": user_data[1],
+                    "name": user_data[2],
+                    "picture": user_data[3],
+                    "created_at": user_data[4],
+                    "preferred_platform": user_data[5],
+                    "preferred_style": user_data[6],
+                    "preferred_duration": user_data[7],
+                    "content_preferences": json.loads(user_data[8]) if user_data[8] else None
+                },
+                "positioning_records": [
+                    {
+                        "id": record[0],
+                        "record_number": record[1],
+                        "content": record[2],
+                        "created_at": record[3]
+                    } for record in positioning_records
+                ],
+                "script_records": [
+                    {
+                        "id": record[0],
+                        "script_name": record[1],
+                        "title": record[2],
+                        "content": record[3],
+                        "script_data": json.loads(record[4]) if record[4] else {},
+                        "platform": record[5],
+                        "topic": record[6],
+                        "profile": record[7],
+                        "created_at": record[8]
+                    } for record in script_records
+                ],
+                "generation_records": [
+                    {
+                        "id": record[0],
+                        "content": record[1],
+                        "platform": record[2],
+                        "topic": record[3],
+                        "created_at": record[4]
+                    } for record in generation_records
+                ],
+                "conversation_summaries": [
+                    {
+                        "id": record[0],
+                        "summary": record[1],
+                        "conversation_type": record[2],
+                        "created_at": record[3]
+                    } for record in conversation_summaries
+                ],
+                "user_preferences": [
+                    {
+                        "preference_type": record[0],
+                        "preference_value": record[1],
+                        "confidence_score": record[2],
+                        "created_at": record[3]
+                    } for record in user_preferences
+                ],
+                "user_behaviors": [
+                    {
+                        "behavior_type": record[0],
+                        "behavior_data": record[1],
+                        "created_at": record[2]
+                    } for record in user_behaviors
+                ]
+            }
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.get("/api/admin/statistics")
+    async def get_admin_statistics():
+        """獲取系統統計資料（管理員用）"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # 用戶總數
+            cursor.execute("SELECT COUNT(*) FROM user_auth")
+            total_users = cursor.fetchone()[0]
+            
+            # 今日新增用戶
+            cursor.execute("""
+                SELECT COUNT(*) FROM user_auth 
+                WHERE DATE(created_at) = DATE('now')
+            """)
+            today_users = cursor.fetchone()[0]
+            
+            # 腳本總數
+            cursor.execute("SELECT COUNT(*) FROM user_scripts")
+            total_scripts = cursor.fetchone()[0]
+            
+            # 帳號定位總數
+            cursor.execute("SELECT COUNT(*) FROM positioning_records")
+            total_positioning = cursor.fetchone()[0]
+            
+            # 生成內容總數
+            cursor.execute("SELECT COUNT(*) FROM generations")
+            total_generations = cursor.fetchone()[0]
+            
+            # 對話摘要總數
+            cursor.execute("SELECT COUNT(*) FROM conversation_summaries")
+            total_conversations = cursor.fetchone()[0]
+            
+            # 平台使用統計
+            cursor.execute("""
+                SELECT platform, COUNT(*) as count
+                FROM user_scripts
+                WHERE platform IS NOT NULL
+                GROUP BY platform
+                ORDER BY count DESC
+            """)
+            platform_stats = cursor.fetchall()
+            
+            # 最近活躍用戶（7天內）
+            cursor.execute("""
+                SELECT COUNT(DISTINCT user_id) 
+                FROM user_scripts 
+                WHERE created_at >= datetime('now', '-7 days')
+            """)
+            active_users_7d = cursor.fetchone()[0]
+            
+            conn.close()
+            
+            return {
+                "total_users": total_users,
+                "today_users": today_users,
+                "total_scripts": total_scripts,
+                "total_positioning": total_positioning,
+                "total_generations": total_generations,
+                "total_conversations": total_conversations,
+                "active_users_7d": active_users_7d,
+                "platform_stats": [
+                    {"platform": stat[0], "count": stat[1]} 
+                    for stat in platform_stats
                 ]
             }
         except Exception as e:
