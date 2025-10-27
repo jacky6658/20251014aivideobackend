@@ -188,10 +188,25 @@ def init_database():
             access_token TEXT,
             refresh_token TEXT,
             expires_at TIMESTAMP,
+            is_subscribed INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    
+    # 為現有用戶添加 is_subscribed 欄位（如果不存在）
+    try:
+        cursor.execute("ALTER TABLE user_auth ADD COLUMN is_subscribed INTEGER DEFAULT 1")
+        print("INFO: 已新增 is_subscribed 欄位到 user_auth 表")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e).lower():
+            print(f"INFO: 欄位 is_subscribed 已存在，跳過新增")
+    
+    # 將所有現有用戶的訂閱狀態設為 1（已訂閱）
+    cursor.execute("UPDATE user_auth SET is_subscribed = 1 WHERE is_subscribed IS NULL OR is_subscribed = 0")
+    updated_count = cursor.rowcount
+    if updated_count > 0:
+        print(f"INFO: 已將 {updated_count} 個用戶設為已訂閱")
     
     # 創建帳號定位記錄表
     cursor.execute("""
@@ -1484,10 +1499,10 @@ def create_app() -> FastAPI:
             conn = get_db_connection()
             cursor = conn.cursor()
             
-            # 獲取所有用戶基本資料
+            # 獲取所有用戶基本資料（包含訂閱狀態）
             cursor.execute("""
                 SELECT ua.user_id, ua.google_id, ua.email, ua.name, ua.picture, 
-                       ua.created_at, up.preferred_platform, up.preferred_style, up.preferred_duration
+                       ua.created_at, ua.is_subscribed, up.preferred_platform, up.preferred_style, up.preferred_duration
                 FROM user_auth ua
                 LEFT JOIN user_profiles up ON ua.user_id = up.user_id
                 ORDER BY ua.created_at DESC
@@ -1502,9 +1517,10 @@ def create_app() -> FastAPI:
                     "name": row[3],
                     "picture": row[4],
                     "created_at": row[5],
-                    "preferred_platform": row[6],
-                    "preferred_style": row[7],
-                    "preferred_duration": row[8]
+                    "is_subscribed": bool(row[6]) if row[6] is not None else True,  # 預設為已訂閱
+                    "preferred_platform": row[7],
+                    "preferred_style": row[8],
+                    "preferred_duration": row[9]
                 })
             
             conn.close()
@@ -1799,8 +1815,8 @@ def create_app() -> FastAPI:
                 
                 cursor.execute("""
                     INSERT OR REPLACE INTO user_auth 
-                    (user_id, google_id, email, name, picture, access_token, expires_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    (user_id, google_id, email, name, picture, access_token, expires_at, is_subscribed, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """, (
                     user_id,
                     google_user.id,
@@ -1808,7 +1824,8 @@ def create_app() -> FastAPI:
                     google_user.name,
                     google_user.picture,
                     access_token,
-                    datetime.now().timestamp() + token_data.get("expires_in", 3600)
+                    datetime.now().timestamp() + token_data.get("expires_in", 3600),
+                    1  # 新用戶預設為已訂閱
                 ))
                 
                 conn.commit()
@@ -2002,7 +2019,7 @@ def create_app() -> FastAPI:
             conn = get_db_connection()
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT google_id, email, name, picture, created_at 
+                SELECT google_id, email, name, picture, is_subscribed, created_at 
                 FROM user_auth 
                 WHERE user_id = ?
             """, (current_user_id,))
@@ -2017,7 +2034,8 @@ def create_app() -> FastAPI:
                     "email": row[1],
                     "name": row[2],
                     "picture": row[3],
-                    "created_at": row[4]
+                    "is_subscribed": bool(row[4]) if row[4] is not None else True,  # 預設為已訂閱
+                    "created_at": row[5]
                 }
             else:
                 raise HTTPException(status_code=404, detail="User not found")
