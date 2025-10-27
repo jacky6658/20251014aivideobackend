@@ -366,6 +366,105 @@ A: 檢查：
 
 ## 更新日誌
 
+### 2025-10-27 - 資料庫持久化配置與訂閱狀態修復
+
+#### 🚀 新增功能
+- **環境變數支援**：使用 `DATABASE_PATH` 環境變數支援持久化存儲配置
+- **訂閱狀態修復**：修正 `is_subscribed` 欄位的處理邏輯，確保正確讀取訂閱狀態
+- **資料庫欄位補齊**：自動檢查並新增 `is_subscribed` 欄位到現有資料庫
+- **預設訂閱設定**：新註冊用戶預設為已訂閱狀態
+
+#### 🛠️ 技術修改
+**檔案：app.py**
+
+**1. 資料庫路徑配置**：
+- 修改 `init_database()` 函數支援環境變數 `DATABASE_PATH`
+- 預設路徑為 `./data`，可通過環境變數設定為 `/persistent` 等持久化路徑
+- 修改 `get_db_connection()` 函數使用相同的路徑邏輯
+- 添加路徑創建和日誌記錄
+
+```python
+def init_database():
+    # 優先使用環境變數指定的路徑（持久化存儲）
+    db_dir = os.getenv("DATABASE_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
+    db_path = os.path.join(db_dir, "chatbot.db")
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+```
+
+**2. 訂閱狀態處理**：
+- 修改 `google_callback_get()` 函數：新用戶註冊時設定 `is_subscribed = 1`
+- 修改 `get_current_user_info()` 函數：正確處理 `is_subscribed` 欄位的各種類型
+- 添加預設值處理：如果欄位為 `None`，預設設為 `True`（已訂閱）
+
+```python
+# 將所有現有用戶的訂閱狀態設為 1（已訂閱）
+cursor.execute("UPDATE user_auth SET is_subscribed = 1 WHERE is_subscribed IS NULL OR is_subscribed = 0")
+```
+
+**3. 資料庫結構更新**：
+- 在 `init_database()` 中添加 `ALTER TABLE` 語句檢查並新增 `is_subscribed` 欄位
+- 如果欄位不存在，自動新增
+- 如果欄位已存在，跳過新增步驟
+- 將所有現有用戶的 `is_subscribed` 設定為 1（已訂閱）
+
+#### 📊 資料庫配置
+
+**本地開發環境**：
+```bash
+DATABASE_PATH=./data  # 預設，存儲在 backend/data/chatbot.db
+```
+
+**Zeabur 部署環境**：
+```bash
+DATABASE_PATH=/persistent  # 持久化存儲路徑
+```
+
+需要在 Zeabur 配置 Persistent Storage 並掛載到 `/persistent` 目錄。
+
+#### 🎯 功能特點
+- **持久化存儲支援**：通過環境變數配置資料庫路徑，支援 Zeabur Persistent Storage
+- **向後兼容**：自動處理資料庫結構變更，不影響現有用戶
+- **預設訂閱**：所有用戶預設為已訂閱狀態，方便測試和開發
+- **類型安全**：正確處理 `is_subscribed` 欄位的各種類型（boolean, int, string）
+
+#### 📝 修改細節
+- **資料庫初始化**：添加 `ALTER TABLE` 檢查，確保 `is_subscribed` 欄位存在
+- **類型轉換**：使用 `bool(row[4])` 確保返回正確的布林值
+- **預設值處理**：如果 `is_subscribed` 為 `None`，預設設為 `True`
+- **路徑配置**：統一使用 `DATABASE_PATH` 環境變數配置資料庫路徑
+
+#### 🎯 測試結果
+所有功能已驗證正常：
+- ✅ **資料庫路徑配置**：正確讀取環境變數並設定資料庫路徑
+- ✅ **訂閱狀態修復**：`is_subscribed` 欄位正確讀取和處理
+- ✅ **新用戶註冊**：新用戶自動設定為已訂閱
+- ✅ **資料庫結構更新**：自動檢查並新增缺失的欄位
+- ✅ **向後兼容**：不影響現有用戶的資料和功能
+
+#### 📝 經驗總結
+1. **持久化存儲**：使用環境變數配置資料庫路徑，支援容器化部署的持久化存儲需求
+2. **資料庫遷移**：通過 `ALTER TABLE` 和 `UPDATE` 語句實現平滑的資料庫結構更新
+3. **類型處理**：考慮資料庫欄位的不同類型，確保正確的類型轉換
+4. **預設值策略**：預設設為已訂閱狀態，降低測試和開發的門檻
+5. **Zeabur 部署**：配置 Persistent Storage 掛載到 `/persistent` 目錄，確保資料持久化
+
+#### ⚠️ 部署注意事項
+1. **Zeabur Persistent Storage**：
+   - 在 Zeabur 專案設定中啟用 Persistent Storage
+   - 設定掛載路徑為 `/persistent`
+   - 設定環境變數 `DATABASE_PATH=/persistent`
+
+2. **資料遷移**：
+   - 首次部署時，資料庫會自動新增 `is_subscribed` 欄位
+   - 現有用戶的訂閱狀態會自動設為 1（已訂閱）
+   - 不需要手動執行遷移腳本
+
+3. **資料備份**：
+   - 啟用 Persistent Storage 後，資料會保存到掛載的卷
+   - 定期備份 `/persistent` 目錄的資料
+
+---
+
 ### 2025-01-21 - 重大更新：實現長期記憶與個人化功能
 
 #### 🚀 新增功能
