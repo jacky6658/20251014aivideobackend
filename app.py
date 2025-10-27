@@ -105,8 +105,11 @@ security = HTTPBearer()
 # 數據庫初始化
 def init_database():
     """初始化 SQLite 數據庫"""
-    db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chatbot.db")
+    # 優先使用環境變數指定的路徑（持久化存儲）
+    db_dir = os.getenv("DATABASE_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
+    db_path = os.path.join(db_dir, "chatbot.db")
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    print(f"INFO: 資料庫路徑: {db_path}")
     
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
@@ -245,7 +248,9 @@ def init_database():
 
 def get_db_connection():
     """獲取數據庫連接"""
-    db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chatbot.db")
+    # 使用相同的資料庫路徑邏輯
+    db_dir = os.getenv("DATABASE_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
+    db_path = os.path.join(db_dir, "chatbot.db")
     conn = sqlite3.connect(db_path, timeout=30.0)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
