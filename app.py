@@ -201,6 +201,21 @@ def init_database():
         )
     """)
     
+    # 兼容舊表：補齊缺少欄位（message_count, updated_at）
+    try:
+        execute_sql("""
+            ALTER TABLE conversation_summaries ADD COLUMN message_count INTEGER DEFAULT 0
+        """)
+    except Exception as e:
+        # 欄位已存在則略過（SQLite/PG 不同錯誤訊息，這裡容錯）
+        pass
+    try:
+        execute_sql("""
+            ALTER TABLE conversation_summaries ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        """)
+    except Exception as e:
+        pass
+    
     # 創建用戶偏好追蹤表
     execute_sql("""
         CREATE TABLE IF NOT EXISTS user_preferences (
@@ -3522,20 +3537,35 @@ def create_app() -> FastAPI:
             # 保存到數據庫
             conn = get_db_connection()
             cursor = conn.cursor()
+
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+
+            message_cnt = len(messages)
+
+            if use_postgresql:
+                # PostgreSQL upsert：以 (user_id, created_at, summary) 近似去重，避免重複
+                cursor.execute("""
+                    INSERT INTO conversation_summaries (user_id, summary, conversation_type, created_at, message_count, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                """, (
+                    user_id, summary, classify_conversation(user_message=messages[-1].content if messages else "", ai_response=summary), datetime.now(), message_cnt
+                ))
+            else:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO conversation_summaries 
+                    (user_id, summary, message_count, updated_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                """, (user_id, summary, message_cnt))
             
-            cursor.execute("""
-                INSERT OR REPLACE INTO conversation_summaries 
-                (user_id, summary, message_count, updated_at)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            """, (user_id, summary, len(messages)))
-            
-            conn.commit()
+            if not use_postgresql:
+                conn.commit()
             conn.close()
             
             return {
                 "message": "Conversation summary created",
                 "summary": summary,
-                "message_count": len(messages)
+                "message_count": message_cnt
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
