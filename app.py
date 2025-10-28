@@ -1583,7 +1583,7 @@ def create_app() -> FastAPI:
             conn = get_db_connection()
             cursor = conn.cursor()
             
-            # 獲取所有用戶基本資料（包含訂閱狀態）
+            # 獲取所有用戶基本資料（包含訂閱狀態和統計）
             cursor.execute("""
                 SELECT ua.user_id, ua.google_id, ua.email, ua.name, ua.picture, 
                        ua.created_at, ua.is_subscribed, up.preferred_platform, up.preferred_style, up.preferred_duration
@@ -1593,9 +1593,36 @@ def create_app() -> FastAPI:
             """)
             
             users = []
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
             for row in cursor.fetchall():
+                user_id = row[0]
+                
+                # 獲取對話數
+                if use_postgresql:
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM conversation_summaries WHERE user_id = %s
+                    """, (user_id,))
+                else:
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM conversation_summaries WHERE user_id = ?
+                    """, (user_id,))
+                conversation_count = cursor.fetchone()[0]
+                
+                # 獲取腳本數
+                if use_postgresql:
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM user_scripts WHERE user_id = %s
+                    """, (user_id,))
+                else:
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM user_scripts WHERE user_id = ?
+                    """, (user_id,))
+                script_count = cursor.fetchone()[0]
+                
                 users.append({
-                    "user_id": row[0],
+                    "user_id": user_id,
                     "google_id": row[1],
                     "email": row[2],
                     "name": row[3],
@@ -1604,7 +1631,9 @@ def create_app() -> FastAPI:
                     "is_subscribed": bool(row[6]) if row[6] is not None else True,  # 預設為已訂閱
                     "preferred_platform": row[7],
                     "preferred_style": row[8],
-                    "preferred_duration": row[9]
+                    "preferred_duration": row[9],
+                    "conversation_count": conversation_count,
+                    "script_count": script_count
                 })
             
             conn.close()
