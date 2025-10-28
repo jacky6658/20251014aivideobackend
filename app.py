@@ -1765,15 +1765,25 @@ def create_app() -> FastAPI:
             conn = get_db_connection()
             cursor = conn.cursor()
             
+            # 判斷資料庫類型
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
             # 用戶總數
             cursor.execute("SELECT COUNT(*) FROM user_auth")
             total_users = cursor.fetchone()[0]
             
-            # 今日新增用戶
-            cursor.execute("""
-                SELECT COUNT(*) FROM user_auth 
-                WHERE DATE(created_at) = DATE('now')
-            """)
+            # 今日新增用戶（兼容 SQLite 和 PostgreSQL）
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM user_auth 
+                    WHERE created_at::date = CURRENT_DATE
+                """)
+            else:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM user_auth 
+                    WHERE DATE(created_at) = DATE('now')
+                """)
             today_users = cursor.fetchone()[0]
             
             # 腳本總數
@@ -1802,12 +1812,19 @@ def create_app() -> FastAPI:
             """)
             platform_stats = cursor.fetchall()
             
-            # 最近活躍用戶（7天內）
-            cursor.execute("""
-                SELECT COUNT(DISTINCT user_id) 
-                FROM user_scripts 
-                WHERE created_at >= datetime('now', '-7 days')
-            """)
+            # 最近活躍用戶（7天內）（兼容 SQLite 和 PostgreSQL）
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT user_id) 
+                    FROM user_scripts 
+                    WHERE created_at >= CURRENT_TIMESTAMP - INTERVAL '7 days'
+                """)
+            else:
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT user_id) 
+                    FROM user_scripts 
+                    WHERE created_at >= datetime('now', '-7 days')
+                """)
             active_users_7d = cursor.fetchone()[0]
             
             conn.close()
