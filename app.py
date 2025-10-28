@@ -2397,22 +2397,53 @@ def create_app() -> FastAPI:
                 conn = get_db_connection()
                 cursor = conn.cursor()
                 
-                cursor.execute("""
-                    INSERT OR REPLACE INTO user_auth 
-                    (user_id, google_id, email, name, picture, access_token, expires_at, is_subscribed, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """, (
-                    user_id,
-                    google_user.id,
-                    google_user.email,
-                    google_user.name,
-                    google_user.picture,
-                    access_token,
-                    datetime.now().timestamp() + token_data.get("expires_in", 3600),
-                    1  # 新用戶預設為已訂閱
-                ))
+                database_url = os.getenv("DATABASE_URL")
+                use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
                 
-                conn.commit()
+                if use_postgresql:
+                    # PostgreSQL 語法
+                    cursor.execute("""
+                        INSERT INTO user_auth 
+                        (user_id, google_id, email, name, picture, access_token, expires_at, is_subscribed, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        ON CONFLICT (user_id) 
+                        DO UPDATE SET 
+                            google_id = EXCLUDED.google_id,
+                            email = EXCLUDED.email,
+                            name = EXCLUDED.name,
+                            picture = EXCLUDED.picture,
+                            access_token = EXCLUDED.access_token,
+                            expires_at = EXCLUDED.expires_at,
+                            updated_at = CURRENT_TIMESTAMP
+                    """, (
+                        user_id,
+                        google_user.id,
+                        google_user.email,
+                        google_user.name,
+                        google_user.picture,
+                        access_token,
+                        datetime.now().timestamp() + token_data.get("expires_in", 3600),
+                        1  # 新用戶預設為已訂閱
+                    ))
+                else:
+                    # SQLite 語法
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO user_auth 
+                        (user_id, google_id, email, name, picture, access_token, expires_at, is_subscribed, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """, (
+                        user_id,
+                        google_user.id,
+                        google_user.email,
+                        google_user.name,
+                        google_user.picture,
+                        access_token,
+                        datetime.now().timestamp() + token_data.get("expires_in", 3600),
+                        1  # 新用戶預設為已訂閱
+                    ))
+                
+                if not use_postgresql:
+                    conn.commit()
                 conn.close()
                 
                 # 生成應用程式訪問令牌
@@ -2563,21 +2594,51 @@ def create_app() -> FastAPI:
                 conn = get_db_connection()
                 cursor = conn.cursor()
                 
-                cursor.execute("""
-                    INSERT OR REPLACE INTO user_auth 
-                    (user_id, google_id, email, name, picture, access_token, expires_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """, (
-                    user_id,
-                    google_user.id,
-                    google_user.email,
-                    google_user.name,
-                    google_user.picture,
-                    access_token,
-                    datetime.now().timestamp() + token_data.get("expires_in", 3600)
-                ))
+                database_url = os.getenv("DATABASE_URL")
+                use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
                 
-                conn.commit()
+                if use_postgresql:
+                    # PostgreSQL 語法
+                    cursor.execute("""
+                        INSERT INTO user_auth 
+                        (user_id, google_id, email, name, picture, access_token, expires_at, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        ON CONFLICT (user_id) 
+                        DO UPDATE SET 
+                            google_id = EXCLUDED.google_id,
+                            email = EXCLUDED.email,
+                            name = EXCLUDED.name,
+                            picture = EXCLUDED.picture,
+                            access_token = EXCLUDED.access_token,
+                            expires_at = EXCLUDED.expires_at,
+                            updated_at = CURRENT_TIMESTAMP
+                    """, (
+                        user_id,
+                        google_user.id,
+                        google_user.email,
+                        google_user.name,
+                        google_user.picture,
+                        access_token,
+                        datetime.now().timestamp() + token_data.get("expires_in", 3600)
+                    ))
+                else:
+                    # SQLite 語法
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO user_auth 
+                        (user_id, google_id, email, name, picture, access_token, expires_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """, (
+                        user_id,
+                        google_user.id,
+                        google_user.email,
+                        google_user.name,
+                        google_user.picture,
+                        access_token,
+                        datetime.now().timestamp() + token_data.get("expires_in", 3600)
+                    ))
+                
+                if not use_postgresql:
+                    conn.commit()
                 conn.close()
                 
                 # 生成應用程式訪問令牌
