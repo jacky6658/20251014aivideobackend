@@ -2402,6 +2402,9 @@ def create_app() -> FastAPI:
                 
                 if use_postgresql:
                     # PostgreSQL 語法
+                    from datetime import timedelta
+                    expires_at_value = datetime.now() + timedelta(seconds=token_data.get("expires_in", 3600))
+                    
                     cursor.execute("""
                         INSERT INTO user_auth 
                         (user_id, google_id, email, name, picture, access_token, expires_at, is_subscribed, updated_at)
@@ -2422,7 +2425,7 @@ def create_app() -> FastAPI:
                         google_user.name,
                         google_user.picture,
                         access_token,
-                        datetime.now().timestamp() + token_data.get("expires_in", 3600),
+                        expires_at_value,
                         1  # 新用戶預設為已訂閱
                     ))
                 else:
@@ -2599,6 +2602,9 @@ def create_app() -> FastAPI:
                 
                 if use_postgresql:
                     # PostgreSQL 語法
+                    from datetime import timedelta
+                    expires_at_value = datetime.now() + timedelta(seconds=token_data.get("expires_in", 3600))
+                    
                     cursor.execute("""
                         INSERT INTO user_auth 
                         (user_id, google_id, email, name, picture, access_token, expires_at, updated_at)
@@ -2619,7 +2625,7 @@ def create_app() -> FastAPI:
                         google_user.name,
                         google_user.picture,
                         access_token,
-                        datetime.now().timestamp() + token_data.get("expires_in", 3600)
+                        expires_at_value
                     ))
                 else:
                     # SQLite 語法
