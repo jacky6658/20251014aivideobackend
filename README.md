@@ -366,6 +366,39 @@ A: 檢查：
 
 ## 更新日誌
 
+### 2025-10-28 - 上架前完整功能更新
+
+#### 🚀 新增功能
+- **管理後台完整 API 端點**：新增 6 個管理後台專用 API
+- **訂閱管理功能**：管理員可手動設定用戶訂閱狀態
+- **CSV 匯出功能**：支援匯出用戶、腳本、對話、生成記錄
+- **真實數據整合**：所有圖表和統計都使用真實資料庫數據
+
+#### 📊 新增 API 端點
+1. `GET /api/admin/mode-statistics` - 模式使用統計
+2. `GET /api/admin/generations` - 生成記錄列表
+3. `GET /api/admin/platform-statistics` - 平台使用統計
+4. `GET /api/admin/user-activities` - 最近用戶活動
+5. `GET /api/admin/analytics-data` - 分析頁面數據
+6. `PUT /api/admin/users/{user_id}/subscription` - 更新訂閱狀態
+7. `GET /api/admin/export/{type}.csv` - CSV 匯出
+
+#### 🎯 訂閱管理
+- **API 端點**：`PUT /api/admin/users/{user_id}/subscription`
+- **功能**：管理員可手動啟用或取消用戶訂閱
+- **支援**：PostgreSQL 和 SQLite
+- **自動更新**：即時更新 UI 顯示
+
+#### 📥 CSV 匯出
+- **支援類型**：users, scripts, conversations, generations
+- **自動下載**：點擊匯出按鈕自動下載檔案
+- **完整數據**：包含所有相關欄位
+
+#### 🛠️ PostgreSQL 完整支援
+- **優先使用**：有 `DATABASE_URL` 時自動使用 PostgreSQL
+- **向後兼容**：沒有 PostgreSQL 時自動回退到 SQLite
+- **語法兼容**：自動處理 SQLite 和 PostgreSQL 語法差異
+
 ### 2025-10-27 - 資料庫持久化配置與訂閱狀態修復
 
 #### 🚀 新增功能
