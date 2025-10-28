@@ -3660,6 +3660,7 @@ def create_app() -> FastAPI:
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    return app
 
 app = create_app()
 
