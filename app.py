@@ -934,7 +934,9 @@ def create_app() -> FastAPI:
         "https://aivideonew.zeabur.app",
         "http://aivideonew.zeabur.app",
         "https://reelmind.aijob.com.tw",
-        "http://reelmind.aijob.com.tw"
+        "http://reelmind.aijob.com.tw",
+        "https://backmanage.zeabur.app",
+        "http://backmanage.zeabur.app"
     ]
     
     # 如果有設定前端 URL，加入 CORS 來源
