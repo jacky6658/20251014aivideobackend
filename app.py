@@ -914,11 +914,12 @@ def create_app() -> FastAPI:
     # CORS for local file or dev servers
     frontend_url = os.getenv("FRONTEND_URL")
     cors_origins = [
-        "*",  # 允許所有來源（開發用）
-        "http://localhost:8080",  # 本地開發前端
-        "http://127.0.0.1:8080",  # 本地開發前端
-        "https://aivideonew.zeabur.app",  # Zeabur 前端部署
-        "http://aivideonew.zeabur.app"    # Zeabur 前端部署（HTTP）
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "https://aivideonew.zeabur.app",
+        "http://aivideonew.zeabur.app",
+        "https://reelmind.aijob.com.tw",
+        "http://reelmind.aijob.com.tw"
     ]
     
     # 如果有設定前端 URL，加入 CORS 來源
