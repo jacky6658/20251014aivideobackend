@@ -373,6 +373,8 @@ A: 檢查：
 - **訂閱管理功能**：管理員可手動設定用戶訂閱狀態
 - **CSV 匯出功能**：支援匯出用戶、腳本、對話、生成記錄
 - **真實數據整合**：所有圖表和統計都使用真實資料庫數據
+- **PostgreSQL 完整支援**：自動處理 SQLite 和 PostgreSQL 語法差異
+- **時區處理**：正確處理台灣時區 (UTC+8) 的日期顯示
 
 #### 📊 新增 API 端點
 1. `GET /api/admin/mode-statistics` - 模式使用統計
@@ -382,6 +384,15 @@ A: 檢查：
 5. `GET /api/admin/analytics-data` - 分析頁面數據
 6. `PUT /api/admin/users/{user_id}/subscription` - 更新訂閱狀態
 7. `GET /api/admin/export/{type}.csv` - CSV 匯出
+8. `GET /api/admin/conversations` - 獲取所有對話記錄（新增）
+9. `GET /api/admin/scripts` - 獲取所有腳本記錄（新增）
+
+#### 🛠️ 技術修改
+- **SQL 語法兼容性**：自動處理 SQLite (`?`) 和 PostgreSQL (`%s`) 的佔位符差異
+- **INSERT OR REPLACE 修復**：PostgreSQL 使用 `ON CONFLICT ... DO UPDATE SET` 語法
+- **時戳類型修復**：PostgreSQL 使用 datetime 對象，SQLite 使用 Unix timestamp
+- **時區轉換**：所有日期顯示轉換為台灣時區 (UTC+8)
+- **用戶訂閱狀態**：新增 `is_subscribed` 欄位，默認值為 1（已訂閱）
 
 #### 🎯 訂閱管理
 - **API 端點**：`PUT /api/admin/users/{user_id}/subscription`
@@ -398,6 +409,27 @@ A: 檢查：
 - **優先使用**：有 `DATABASE_URL` 時自動使用 PostgreSQL
 - **向後兼容**：沒有 PostgreSQL 時自動回退到 SQLite
 - **語法兼容**：自動處理 SQLite 和 PostgreSQL 語法差異
+
+#### 🔧 關鍵問題修復
+1. **Google OAuth 登入修復**：
+   - 修復 `INSERT OR REPLACE` 語法在 PostgreSQL 的兼容性問題
+   - 使用 `ON CONFLICT ... DO UPDATE SET` 替代 SQLite 特有語法
+   - 修復 `expires_at` 欄位的類型不匹配問題（timestamp vs numeric）
+
+2. **時區處理修復**：
+   - 所有日期顯示轉換為台灣時區 (UTC+8)
+   - `/api/auth/me` 和 `/api/admin/users` 正確格式化日期
+   - 使用 `datetime.astimezone()` 確保時間顯示正確
+
+3. **SQL 語法自動轉換**：
+   - 佔位符自動轉換：SQLite (`?`) → PostgreSQL (`%s`)
+   - 日期函數兼容：SQLite (`datetime('now')`) → PostgreSQL (`CURRENT_TIMESTAMP`)
+   - RETURNING 語法：PostgreSQL 使用 `RETURNING id`，SQLite 使用 `lastrowid`
+
+4. **數據顯示修復**：
+   - 用戶列表正確顯示對話數和腳本數
+   - 修正「註冊時間」和「訂閱狀態」欄位顯示順序
+   - 所有統計數據使用真實資料庫數據，完全移除假數據
 
 ### 2025-10-27 - 資料庫持久化配置與訂閱狀態修復
 

@@ -2238,6 +2238,63 @@ def create_app() -> FastAPI:
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
     
+    @app.get("/api/admin/conversations")
+    async def get_all_conversations():
+        """獲取所有對話記錄（管理員用）"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT cs.id, cs.user_id, cs.conversation_type, cs.summary, cs.message_count, cs.created_at, 
+                           ua.name, ua.email
+                    FROM conversation_summaries cs
+                    LEFT JOIN user_auth ua ON cs.user_id = ua.user_id
+                    ORDER BY cs.created_at DESC
+                    LIMIT 100
+                """)
+            else:
+                cursor.execute("""
+                    SELECT cs.id, cs.user_id, cs.conversation_type, cs.summary, cs.message_count, cs.created_at, 
+                           ua.name, ua.email
+                    FROM conversation_summaries cs
+                    LEFT JOIN user_auth ua ON cs.user_id = ua.user_id
+                    ORDER BY cs.created_at DESC
+                    LIMIT 100
+                """)
+            
+            conversations = []
+            conv_type_map = {
+                "account_positioning": "帳號定位",
+                "topic_selection": "選題討論",
+                "script_generation": "腳本生成",
+                "general_consultation": "AI顧問",
+                "ip_planning": "IP人設規劃"
+            }
+            
+            for row in cursor.fetchall():
+                conversations.append({
+                    "id": row[0],
+                    "user_id": row[1],
+                    "mode": conv_type_map.get(row[2], row[2]),
+                    "conversation_type": row[2],
+                    "summary": row[3] or "",
+                    "message_count": row[4] or 0,
+                    "created_at": row[5],
+                    "user_name": row[6] or "未知用戶",
+                    "user_email": row[7] or ""
+                })
+            
+            conn.close()
+            
+            return {"conversations": conversations}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
     @app.get("/api/admin/generations")
     async def get_all_generations():
         """獲取所有生成記錄"""
@@ -2245,14 +2302,27 @@ def create_app() -> FastAPI:
             conn = get_db_connection()
             cursor = conn.cursor()
             
-            cursor.execute("""
-                SELECT g.id, g.user_id, g.platform, g.topic, g.content, g.created_at, 
-                       u.name, u.email
-                FROM generations g
-                LEFT JOIN user_auth u ON g.user_id = u.user_id
-                ORDER BY g.created_at DESC
-                LIMIT 100
-            """)
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT g.id, g.user_id, g.platform, g.topic, g.content, g.created_at, 
+                           ua.name, ua.email
+                    FROM generations g
+                    LEFT JOIN user_auth ua ON g.user_id = ua.user_id
+                    ORDER BY g.created_at DESC
+                    LIMIT 100
+                """)
+            else:
+                cursor.execute("""
+                    SELECT g.id, g.user_id, g.platform, g.topic, g.content, g.created_at, 
+                           ua.name, ua.email
+                    FROM generations g
+                    LEFT JOIN user_auth ua ON g.user_id = ua.user_id
+                    ORDER BY g.created_at DESC
+                    LIMIT 100
+                """)
             
             generations = []
             for row in cursor.fetchall():
@@ -2274,12 +2344,65 @@ def create_app() -> FastAPI:
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
     
+    @app.get("/api/admin/scripts")
+    async def get_all_scripts():
+        """獲取所有腳本記錄（管理員用）"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT us.id, us.user_id, us.script_name, us.title, us.platform, us.topic, 
+                           us.created_at, ua.name, ua.email
+                    FROM user_scripts us
+                    LEFT JOIN user_auth ua ON us.user_id = ua.user_id
+                    ORDER BY us.created_at DESC
+                    LIMIT 100
+                """)
+            else:
+                cursor.execute("""
+                    SELECT us.id, us.user_id, us.script_name, us.title, us.platform, us.topic, 
+                           us.created_at, ua.name, ua.email
+                    FROM user_scripts us
+                    LEFT JOIN user_auth ua ON us.user_id = ua.user_id
+                    ORDER BY us.created_at DESC
+                    LIMIT 100
+                """)
+            
+            scripts = []
+            for row in cursor.fetchall():
+                scripts.append({
+                    "id": row[0],
+                    "user_id": row[1],
+                    "name": row[2] or row[3] or "未命名腳本",
+                    "title": row[3] or row[2] or "未命名腳本",
+                    "platform": row[4] or "未設定",
+                    "category": row[5] or "未分類",
+                    "topic": row[5] or "未分類",
+                    "created_at": row[6],
+                    "user_name": row[7] or "未知用戶",
+                    "user_email": row[8] or ""
+                })
+            
+            conn.close()
+            
+            return {"scripts": scripts}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
     @app.get("/api/admin/platform-statistics")
     async def get_platform_statistics():
         """獲取平台使用統計"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
             
             cursor.execute("""
                 SELECT platform, COUNT(*) as count
