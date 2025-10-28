@@ -1790,17 +1790,27 @@ def create_app() -> FastAPI:
             cursor = conn.cursor()
             
             # 獲取所有用戶基本資料（包含訂閱狀態和統計）
-            cursor.execute("""
-                SELECT ua.user_id, ua.google_id, ua.email, ua.name, ua.picture, 
-                       ua.created_at, ua.is_subscribed, up.preferred_platform, up.preferred_style, up.preferred_duration
-                FROM user_auth ua
-                LEFT JOIN user_profiles up ON ua.user_id = up.user_id
-                ORDER BY ua.created_at DESC
-            """)
-            
-            users = []
             database_url = os.getenv("DATABASE_URL")
             use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT ua.user_id, ua.google_id, ua.email, ua.name, ua.picture, 
+                           ua.created_at, ua.is_subscribed, up.preferred_platform, up.preferred_style, up.preferred_duration
+                    FROM user_auth ua
+                    LEFT JOIN user_profiles up ON ua.user_id = up.user_id
+                    ORDER BY ua.created_at DESC
+                """)
+            else:
+                cursor.execute("""
+                    SELECT ua.user_id, ua.google_id, ua.email, ua.name, ua.picture, 
+                           ua.created_at, ua.is_subscribed, up.preferred_platform, up.preferred_style, up.preferred_duration
+                    FROM user_auth ua
+                    LEFT JOIN user_profiles up ON ua.user_id = up.user_id
+                    ORDER BY ua.created_at DESC
+                """)
+            
+            users = []
             
             for row in cursor.fetchall():
                 user_id = row[0]
@@ -1827,13 +1837,36 @@ def create_app() -> FastAPI:
                     """, (user_id,))
                 script_count = cursor.fetchone()[0]
                 
+                # 格式化日期（台灣時區 UTC+8）
+                created_at = row[5]
+                if created_at:
+                    try:
+                        from datetime import timezone, timedelta
+                        if isinstance(created_at, datetime):
+                            dt = created_at
+                        elif isinstance(created_at, str):
+                            dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                        else:
+                            dt = None
+                        
+                        if dt:
+                            # 轉換為台灣時區 (UTC+8)
+                            taiwan_tz = timezone(timedelta(hours=8))
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            dt_taiwan = dt.astimezone(taiwan_tz)
+                            created_at = dt_taiwan.strftime('%Y/%m/%d %H:%M')
+                    except Exception as e:
+                        print(f"格式化日期時出錯: {e}")
+                        pass
+                
                 users.append({
                     "user_id": user_id,
                     "google_id": row[1],
                     "email": row[2],
                     "name": row[3],
                     "picture": row[4],
-                    "created_at": row[5],
+                    "created_at": created_at,
                     "is_subscribed": bool(row[6]) if row[6] is not None else True,  # 預設為已訂閱
                     "preferred_platform": row[7],
                     "preferred_style": row[8],
@@ -2925,6 +2958,32 @@ def create_app() -> FastAPI:
             conn.close()
             
             if row:
+                # 格式化日期（台灣時區 UTC+8）
+                created_at = row[5]
+                if created_at:
+                    try:
+                        from datetime import timezone, timedelta
+                        if isinstance(created_at, datetime):
+                            # 如果是 datetime 對象，直接使用
+                            dt = created_at
+                        elif isinstance(created_at, str):
+                            # 如果是字符串，解析它
+                            dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                        else:
+                            dt = None
+                        
+                        if dt:
+                            # 轉換為台灣時區 (UTC+8)
+                            taiwan_tz = timezone(timedelta(hours=8))
+                            if dt.tzinfo is None:
+                                # 如果沒有時區信息，假設是 UTC
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            dt_taiwan = dt.astimezone(taiwan_tz)
+                            created_at = dt_taiwan.strftime('%Y/%m/%d %H:%M')
+                    except Exception as e:
+                        print(f"格式化日期時出錯: {e}")
+                        pass
+                
                 return {
                     "user_id": current_user_id,
                     "google_id": row[0],
@@ -2932,7 +2991,7 @@ def create_app() -> FastAPI:
                     "name": row[2],
                     "picture": row[3],
                     "is_subscribed": bool(row[4]) if row[4] is not None else True,  # 預設為已訂閱
-                    "created_at": row[5]
+                    "created_at": created_at
                 }
             else:
                 raise HTTPException(status_code=404, detail="User not found")
