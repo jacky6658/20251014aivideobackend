@@ -1322,12 +1322,23 @@ def create_app() -> FastAPI:
             conn = get_db_connection()
             cursor = conn.cursor()
             
-            cursor.execute("""
-                SELECT platform, topic, content, created_at FROM generations 
-                WHERE user_id = ? 
-                ORDER BY created_at DESC 
-                LIMIT 10
-            """, (user_id,))
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT platform, topic, content, created_at FROM generations 
+                    WHERE user_id = %s 
+                    ORDER BY created_at DESC 
+                    LIMIT 10
+                """, (user_id,))
+            else:
+                cursor.execute("""
+                    SELECT platform, topic, content, created_at FROM generations 
+                    WHERE user_id = ? 
+                    ORDER BY created_at DESC 
+                    LIMIT 10
+                """, (user_id,))
             generations = cursor.fetchall()
             
             conn.close()
@@ -1990,71 +2001,131 @@ def create_app() -> FastAPI:
             conn = get_db_connection()
             cursor = conn.cursor()
             
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
             # 用戶基本資料
-            cursor.execute("""
-                SELECT ua.google_id, ua.email, ua.name, ua.picture, ua.created_at,
-                       up.preferred_platform, up.preferred_style, up.preferred_duration, up.content_preferences
-                FROM user_auth ua
-                LEFT JOIN user_profiles up ON ua.user_id = up.user_id
-                WHERE ua.user_id = ?
-            """, (user_id,))
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT ua.google_id, ua.email, ua.name, ua.picture, ua.created_at,
+                           up.preferred_platform, up.preferred_style, up.preferred_duration, up.content_preferences
+                    FROM user_auth ua
+                    LEFT JOIN user_profiles up ON ua.user_id = up.user_id
+                    WHERE ua.user_id = %s
+                """, (user_id,))
+            else:
+                cursor.execute("""
+                    SELECT ua.google_id, ua.email, ua.name, ua.picture, ua.created_at,
+                           up.preferred_platform, up.preferred_style, up.preferred_duration, up.content_preferences
+                    FROM user_auth ua
+                    LEFT JOIN user_profiles up ON ua.user_id = up.user_id
+                    WHERE ua.user_id = ?
+                """, (user_id,))
             
             user_data = cursor.fetchone()
             if not user_data:
                 return JSONResponse({"error": "用戶不存在"}, status_code=404)
             
             # 帳號定位記錄
-            cursor.execute("""
-                SELECT id, record_number, content, created_at
-                FROM positioning_records
-                WHERE user_id = ?
-                ORDER BY created_at DESC
-            """, (user_id,))
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT id, record_number, content, created_at
+                    FROM positioning_records
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                """, (user_id,))
+            else:
+                cursor.execute("""
+                    SELECT id, record_number, content, created_at
+                    FROM positioning_records
+                    WHERE user_id = ?
+                    ORDER BY created_at DESC
+                """, (user_id,))
             positioning_records = cursor.fetchall()
             
             # 腳本記錄
-            cursor.execute("""
-                SELECT id, script_name, title, content, script_data, platform, topic, profile, created_at
-                FROM user_scripts
-                WHERE user_id = ?
-                ORDER BY created_at DESC
-            """, (user_id,))
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT id, script_name, title, content, script_data, platform, topic, profile, created_at
+                    FROM user_scripts
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                """, (user_id,))
+            else:
+                cursor.execute("""
+                    SELECT id, script_name, title, content, script_data, platform, topic, profile, created_at
+                    FROM user_scripts
+                    WHERE user_id = ?
+                    ORDER BY created_at DESC
+                """, (user_id,))
             script_records = cursor.fetchall()
             
             # 生成記錄
-            cursor.execute("""
-                SELECT id, content, platform, topic, created_at
-                FROM generations
-                WHERE user_id = ?
-                ORDER BY created_at DESC
-            """, (user_id,))
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT id, content, platform, topic, created_at
+                    FROM generations
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                """, (user_id,))
+            else:
+                cursor.execute("""
+                    SELECT id, content, platform, topic, created_at
+                    FROM generations
+                    WHERE user_id = ?
+                    ORDER BY created_at DESC
+                """, (user_id,))
             generation_records = cursor.fetchall()
             
             # 對話摘要
-            cursor.execute("""
-                SELECT id, summary, conversation_type, created_at
-                FROM conversation_summaries
-                WHERE user_id = ?
-                ORDER BY created_at DESC
-            """, (user_id,))
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT id, summary, conversation_type, created_at
+                    FROM conversation_summaries
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                """, (user_id,))
+            else:
+                cursor.execute("""
+                    SELECT id, summary, conversation_type, created_at
+                    FROM conversation_summaries
+                    WHERE user_id = ?
+                    ORDER BY created_at DESC
+                """, (user_id,))
             conversation_summaries = cursor.fetchall()
             
             # 用戶偏好
-            cursor.execute("""
-                SELECT preference_type, preference_value, confidence_score, created_at
-                FROM user_preferences
-                WHERE user_id = ?
-                ORDER BY confidence_score DESC
-            """, (user_id,))
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT preference_type, preference_value, confidence_score, created_at
+                    FROM user_preferences
+                    WHERE user_id = %s
+                    ORDER BY confidence_score DESC
+                """, (user_id,))
+            else:
+                cursor.execute("""
+                    SELECT preference_type, preference_value, confidence_score, created_at
+                    FROM user_preferences
+                    WHERE user_id = ?
+                    ORDER BY confidence_score DESC
+                """, (user_id,))
             user_preferences = cursor.fetchall()
             
             # 用戶行為
-            cursor.execute("""
-                SELECT behavior_type, behavior_data, created_at
-                FROM user_behaviors
-                WHERE user_id = ?
-                ORDER BY created_at DESC
-            """, (user_id,))
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT behavior_type, behavior_data, created_at
+                    FROM user_behaviors
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                """, (user_id,))
+            else:
+                cursor.execute("""
+                    SELECT behavior_type, behavior_data, created_at
+                    FROM user_behaviors
+                    WHERE user_id = ?
+                    ORDER BY created_at DESC
+                """, (user_id,))
             user_behaviors = cursor.fetchall()
             
             conn.close()
