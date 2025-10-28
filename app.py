@@ -296,6 +296,46 @@ def init_database():
         )
     """)
     
+    # 創建購買訂單表（orders）
+    execute_sql("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            order_id TEXT UNIQUE NOT NULL,
+            plan_type TEXT NOT NULL,
+            amount INTEGER NOT NULL,
+            currency TEXT DEFAULT 'TWD',
+            payment_method TEXT,
+            payment_status TEXT DEFAULT 'pending',
+            paid_at TIMESTAMP,
+            expires_at TIMESTAMP,
+            invoice_number TEXT,
+            invoice_type TEXT,
+            vat_number TEXT,
+            raw_data TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # 創建授權記錄表（licenses）
+    execute_sql("""
+        CREATE TABLE IF NOT EXISTS licenses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            order_id TEXT,
+            tier TEXT DEFAULT 'personal',
+            seats INTEGER DEFAULT 1,
+            features_json TEXT,
+            source TEXT,
+            start_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL,
+            status TEXT DEFAULT 'active',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
     # PostgreSQL 使用 AUTOCOMMIT，不需要 commit
     # SQLite 需要 commit
     if not use_postgresql:
@@ -1413,6 +1453,28 @@ def create_app() -> FastAPI:
             
             database_url = os.getenv("DATABASE_URL")
             use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 先檢查 user_profiles 是否存在該 user_id，若不存在則自動建立
+            if use_postgresql:
+                cursor.execute("SELECT user_id FROM user_profiles WHERE user_id = %s", (user_id,))
+            else:
+                cursor.execute("SELECT user_id FROM user_profiles WHERE user_id = ?", (user_id,))
+            profile_exists = cursor.fetchone()
+            
+            if not profile_exists:
+                # 自動建立 user_profiles 記錄
+                if use_postgresql:
+                    cursor.execute("""
+                        INSERT INTO user_profiles (user_id, created_at)
+                        VALUES (%s, CURRENT_TIMESTAMP)
+                        ON CONFLICT (user_id) DO NOTHING
+                    """, (user_id,))
+                else:
+                    cursor.execute("""
+                        INSERT OR IGNORE INTO user_profiles (user_id, created_at)
+                        VALUES (?, CURRENT_TIMESTAMP)
+                    """, (user_id,))
+                conn.commit()
             
             # 獲取該用戶的記錄數量來生成編號
             if use_postgresql:
@@ -3435,6 +3497,172 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     return app
+
+
+# ============ 帳單資訊相關 API ============
+
+@app.get("/api/user/orders/{user_id}")
+async def get_user_orders(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
+    """獲取用戶的購買記錄"""
+    if current_user_id != user_id:
+        return JSONResponse({"error": "無權限訪問此用戶資料"}, status_code=403)
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        database_url = os.getenv("DATABASE_URL")
+        use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+        
+        if use_postgresql:
+            cursor.execute("""
+                SELECT id, order_id, plan_type, amount, currency, payment_method, 
+                       payment_status, paid_at, expires_at, invoice_number, 
+                       invoice_type, created_at
+                FROM orders 
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+            """, (user_id,))
+        else:
+            cursor.execute("""
+                SELECT id, order_id, plan_type, amount, currency, payment_method, 
+                       payment_status, paid_at, expires_at, invoice_number, 
+                       invoice_type, created_at
+                FROM orders 
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+            """, (user_id,))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        orders = []
+        for row in rows:
+            orders.append({
+                "id": row[0],
+                "order_id": row[1],
+                "plan_type": row[2],
+                "amount": row[3],
+                "currency": row[4],
+                "payment_method": row[5],
+                "payment_status": row[6],
+                "paid_at": row[7],
+                "expires_at": row[8],
+                "invoice_number": row[9],
+                "invoice_type": row[10],
+                "created_at": row[11]
+            })
+        
+        return {"orders": orders}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/user/license/{user_id}")
+async def get_user_license(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
+    """獲取用戶的授權資訊"""
+    if current_user_id != user_id:
+        return JSONResponse({"error": "無權限訪問此用戶資料"}, status_code=403)
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        database_url = os.getenv("DATABASE_URL")
+        use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+        
+        if use_postgresql:
+            cursor.execute("""
+                SELECT tier, seats, source, start_at, expires_at, status
+                FROM licenses 
+                WHERE user_id = %s AND status = 'active'
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (user_id,))
+        else:
+            cursor.execute("""
+                SELECT tier, seats, source, start_at, expires_at, status
+                FROM licenses 
+                WHERE user_id = ? AND status = 'active'
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (user_id,))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return {
+                "user_id": user_id,
+                "tier": row[0],
+                "seats": row[1],
+                "source": row[2],
+                "start_at": str(row[3]),
+                "expires_at": str(row[4]),
+                "status": row[5]
+            }
+        else:
+            return {"user_id": user_id, "tier": "none", "expires_at": None}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/admin/orders")
+async def get_all_orders():
+    """獲取所有訂單記錄（管理員用）"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        database_url = os.getenv("DATABASE_URL")
+        use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+        
+        if use_postgresql:
+            cursor.execute("""
+                SELECT o.id, o.user_id, o.order_id, o.plan_type, o.amount, 
+                       o.currency, o.payment_method, o.payment_status, 
+                       o.paid_at, o.expires_at, o.invoice_number, o.created_at,
+                       ua.name, ua.email
+                FROM orders o
+                LEFT JOIN user_auth ua ON o.user_id = ua.user_id
+                ORDER BY o.created_at DESC
+                LIMIT 100
+            """)
+        else:
+            cursor.execute("""
+                SELECT o.id, o.user_id, o.order_id, o.plan_type, o.amount, 
+                       o.currency, o.payment_method, o.payment_status, 
+                       o.paid_at, o.expires_at, o.invoice_number, o.created_at,
+                       ua.name, ua.email
+                FROM orders o
+                LEFT JOIN user_auth ua ON o.user_id = ua.user_id
+                ORDER BY o.created_at DESC
+                LIMIT 100
+            """)
+        
+        orders = []
+        for row in cursor.fetchall():
+            orders.append({
+                "id": row[0],
+                "user_id": row[1],
+                "order_id": row[2],
+                "plan_type": row[3],
+                "amount": row[4],
+                "currency": row[5],
+                "payment_method": row[6],
+                "payment_status": row[7],
+                "paid_at": row[8],
+                "expires_at": row[9],
+                "invoice_number": row[10],
+                "created_at": row[11],
+                "user_name": row[12] or "未知用戶",
+                "user_email": row[13] or ""
+            })
+        
+        conn.close()
+        return {"orders": orders}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 app = create_app()
