@@ -249,15 +249,22 @@ def init_database():
     try:
         cursor.execute("ALTER TABLE user_auth ADD COLUMN is_subscribed INTEGER DEFAULT 1")
         print("INFO: 已新增 is_subscribed 欄位到 user_auth 表")
-    except sqlite3.OperationalError as e:
-        if "duplicate column name" not in str(e).lower():
-            print(f"INFO: 欄位 is_subscribed 已存在，跳過新增")
+    except (sqlite3.OperationalError, Exception) as e:
+        # 兼容 SQLite 和 PostgreSQL 的錯誤
+        error_str = str(e).lower()
+        if "duplicate column" in error_str or "already exists" in error_str:
+            print("INFO: 欄位 is_subscribed 已存在，跳過新增")
+        else:
+            print(f"WARNING: 無法新增 is_subscribed 欄位: {e}")
     
     # 將所有現有用戶的訂閱狀態設為 1（已訂閱）
-    cursor.execute("UPDATE user_auth SET is_subscribed = 1 WHERE is_subscribed IS NULL OR is_subscribed = 0")
-    updated_count = cursor.rowcount
-    if updated_count > 0:
-        print(f"INFO: 已將 {updated_count} 個用戶設為已訂閱")
+    try:
+        cursor.execute("UPDATE user_auth SET is_subscribed = 1 WHERE is_subscribed IS NULL OR is_subscribed = 0")
+        updated_count = cursor.rowcount
+        if updated_count > 0:
+            print(f"INFO: 已將 {updated_count} 個用戶設為已訂閱")
+    except Exception as e:
+        print(f"INFO: 更新訂閱狀態時出現錯誤（可能是表格為空）: {e}")
     
     # 創建帳號定位記錄表
     execute_sql("""
