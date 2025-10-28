@@ -30,6 +30,10 @@
 - ✅ `expires_at` 類型修復（timestamp vs numeric）
 - ✅ 日期函式相容（`datetime('now')` → `CURRENT_TIMESTAMP` / `INTERVAL`）
 - ✅ 加入 `orders`、`licenses` 表，並提供查詢 API
+- ✅ 500 錯誤修復：補齊 `conversation_summaries` 表缺少欄位（`message_count`、`updated_at`）
+- ✅ CORS 設定：加入前端自訂網域 `reelmind.aijob.com.tw` 和後台 `backmanage.zeabur.app`
+- ✅ `create_app()` 函數修正：確保返回 `app` 實例
+- ✅ PostgreSQL/SQLite SQL 語法差異修正：所有 API 端點都支援雙資料庫
 
 ---
 （以下為原 README 內容）
