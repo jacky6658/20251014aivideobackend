@@ -461,20 +461,30 @@ def save_conversation_summary(user_id: str, user_message: str, ai_response: str)
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        
+        database_url = os.getenv("DATABASE_URL")
+        use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
 
         # 智能摘要生成
         summary = generate_smart_summary(user_message, ai_response)
         conversation_type = classify_conversation(user_message, ai_response)
 
-        cursor.execute("""
-            INSERT INTO conversation_summaries (user_id, summary, conversation_type, created_at)
-            VALUES (?, ?, ?, ?)
-        """, (user_id, summary, conversation_type, datetime.now()))
+        if use_postgresql:
+            cursor.execute("""
+                INSERT INTO conversation_summaries (user_id, summary, conversation_type, created_at)
+                VALUES (%s, %s, %s, %s)
+            """, (user_id, summary, conversation_type, datetime.now()))
+        else:
+            cursor.execute("""
+                INSERT INTO conversation_summaries (user_id, summary, conversation_type, created_at)
+                VALUES (?, ?, ?, ?)
+            """, (user_id, summary, conversation_type, datetime.now()))
 
         # 追蹤用戶偏好
         track_user_preferences(user_id, user_message, ai_response, conversation_type)
 
-        conn.commit()
+        if not use_postgresql:
+            conn.commit()
         conn.close()
 
     except Exception as e:
@@ -486,40 +496,69 @@ def track_user_preferences(user_id: str, user_message: str, ai_response: str, co
         conn = get_db_connection()
         cursor = conn.cursor()
         
+        database_url = os.getenv("DATABASE_URL")
+        use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+        
         # 提取偏好信息
         preferences = extract_user_preferences(user_message, ai_response, conversation_type)
         
         for pref_type, pref_value in preferences.items():
             # 檢查是否已存在
-            cursor.execute("""
-                SELECT id, confidence_score FROM user_preferences 
-                WHERE user_id = ? AND preference_type = ?
-            """, (user_id, pref_type))
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT id, confidence_score FROM user_preferences 
+                    WHERE user_id = %s AND preference_type = %s
+                """, (user_id, pref_type))
+            else:
+                cursor.execute("""
+                    SELECT id, confidence_score FROM user_preferences 
+                    WHERE user_id = ? AND preference_type = ?
+                """, (user_id, pref_type))
             
             existing = cursor.fetchone()
             
             if existing:
                 # 更新現有偏好，增加信心分數
                 new_confidence = min(existing[1] + 0.1, 1.0)
-                cursor.execute("""
-                    UPDATE user_preferences 
-                    SET preference_value = ?, confidence_score = ?, updated_at = ?
-                    WHERE id = ?
-                """, (pref_value, new_confidence, datetime.now(), existing[0]))
+                if use_postgresql:
+                    cursor.execute("""
+                        UPDATE user_preferences 
+                        SET preference_value = %s, confidence_score = %s, updated_at = %s
+                        WHERE id = %s
+                    """, (pref_value, new_confidence, datetime.now(), existing[0]))
+                else:
+                    cursor.execute("""
+                        UPDATE user_preferences 
+                        SET preference_value = ?, confidence_score = ?, updated_at = ?
+                        WHERE id = ?
+                    """, (pref_value, new_confidence, datetime.now(), existing[0]))
             else:
                 # 創建新偏好
-                cursor.execute("""
-                    INSERT INTO user_preferences (user_id, preference_type, preference_value, confidence_score)
-                    VALUES (?, ?, ?, ?)
-                """, (user_id, pref_type, pref_value, 0.5))
+                if use_postgresql:
+                    cursor.execute("""
+                        INSERT INTO user_preferences (user_id, preference_type, preference_value, confidence_score)
+                        VALUES (%s, %s, %s, %s)
+                    """, (user_id, pref_type, pref_value, 0.5))
+                else:
+                    cursor.execute("""
+                        INSERT INTO user_preferences (user_id, preference_type, preference_value, confidence_score)
+                        VALUES (?, ?, ?, ?)
+                    """, (user_id, pref_type, pref_value, 0.5))
         
         # 記錄行為
-        cursor.execute("""
-            INSERT INTO user_behaviors (user_id, behavior_type, behavior_data)
-            VALUES (?, ?, ?)
-        """, (user_id, conversation_type, f"用戶輸入: {user_message[:100]}"))
+        if use_postgresql:
+            cursor.execute("""
+                INSERT INTO user_behaviors (user_id, behavior_type, behavior_data)
+                VALUES (%s, %s, %s)
+            """, (user_id, conversation_type, f"用戶輸入: {user_message[:100]}"))
+        else:
+            cursor.execute("""
+                INSERT INTO user_behaviors (user_id, behavior_type, behavior_data)
+                VALUES (?, ?, ?)
+            """, (user_id, conversation_type, f"用戶輸入: {user_message[:100]}"))
         
-        conn.commit()
+        if not use_postgresql:
+            conn.commit()
         conn.close()
         
     except Exception as e:
@@ -616,47 +655,87 @@ def get_user_memory(user_id: Optional[str]) -> str:
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        
+        database_url = os.getenv("DATABASE_URL")
+        use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
 
         # 獲取用戶基本資料
-        cursor.execute("SELECT * FROM user_profiles WHERE user_id = ?", (user_id,))
+        if use_postgresql:
+            cursor.execute("SELECT * FROM user_profiles WHERE user_id = %s", (user_id,))
+        else:
+            cursor.execute("SELECT * FROM user_profiles WHERE user_id = ?", (user_id,))
         profile = cursor.fetchone()
 
         # 獲取用戶偏好
-        cursor.execute("""
-            SELECT preference_type, preference_value, confidence_score 
-            FROM user_preferences 
-            WHERE user_id = ? AND confidence_score > 0.3
-            ORDER BY confidence_score DESC
-        """, (user_id,))
+        if use_postgresql:
+            cursor.execute("""
+                SELECT preference_type, preference_value, confidence_score 
+                FROM user_preferences 
+                WHERE user_id = %s AND confidence_score > 0.3
+                ORDER BY confidence_score DESC
+            """, (user_id,))
+        else:
+            cursor.execute("""
+                SELECT preference_type, preference_value, confidence_score 
+                FROM user_preferences 
+                WHERE user_id = ? AND confidence_score > 0.3
+                ORDER BY confidence_score DESC
+            """, (user_id,))
         preferences = cursor.fetchall()
 
         # 獲取最近的對話摘要（按類型分組）
-        cursor.execute("""
-            SELECT conversation_type, summary, created_at 
-            FROM conversation_summaries
-            WHERE user_id = ?
-            ORDER BY created_at DESC
-            LIMIT 10
-        """, (user_id,))
+        if use_postgresql:
+            cursor.execute("""
+                SELECT conversation_type, summary, created_at 
+                FROM conversation_summaries
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+                LIMIT 10
+            """, (user_id,))
+        else:
+            cursor.execute("""
+                SELECT conversation_type, summary, created_at 
+                FROM conversation_summaries
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+                LIMIT 10
+            """, (user_id,))
         summaries = cursor.fetchall()
 
         # 獲取最近的生成記錄
-        cursor.execute("""
-            SELECT platform, topic, content, created_at FROM generations
-            WHERE user_id = ?
-            ORDER BY created_at DESC
-            LIMIT 5
-        """, (user_id,))
+        if use_postgresql:
+            cursor.execute("""
+                SELECT platform, topic, content, created_at FROM generations
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+                LIMIT 5
+            """, (user_id,))
+        else:
+            cursor.execute("""
+                SELECT platform, topic, content, created_at FROM generations
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+                LIMIT 5
+            """, (user_id,))
         generations = cursor.fetchall()
 
         # 獲取用戶行為統計
-        cursor.execute("""
-            SELECT behavior_type, COUNT(*) as count
-            FROM user_behaviors
-            WHERE user_id = ?
-            GROUP BY behavior_type
-            ORDER BY count DESC
-        """, (user_id,))
+        if use_postgresql:
+            cursor.execute("""
+                SELECT behavior_type, COUNT(*) as count
+                FROM user_behaviors
+                WHERE user_id = %s
+                GROUP BY behavior_type
+                ORDER BY count DESC
+            """, (user_id,))
+        else:
+            cursor.execute("""
+                SELECT behavior_type, COUNT(*) as count
+                FROM user_behaviors
+                WHERE user_id = ?
+                GROUP BY behavior_type
+                ORDER BY count DESC
+            """, (user_id,))
         behaviors = cursor.fetchall()
 
         conn.close()
@@ -1147,22 +1226,48 @@ def create_app() -> FastAPI:
             conn = get_db_connection()
             cursor = conn.cursor()
             
-            cursor.execute("""
-                SELECT summary, created_at FROM conversation_summaries 
-                WHERE user_id = ? 
-                ORDER BY created_at DESC 
-                LIMIT 10
-            """, (user_id,))
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT id, conversation_type, summary, message_count, created_at FROM conversation_summaries 
+                    WHERE user_id = %s 
+                    ORDER BY created_at DESC 
+                    LIMIT 100
+                """, (user_id,))
+            else:
+                cursor.execute("""
+                    SELECT id, conversation_type, summary, message_count, created_at FROM conversation_summaries 
+                    WHERE user_id = ? 
+                    ORDER BY created_at DESC 
+                    LIMIT 100
+                """, (user_id,))
+            
             conversations = cursor.fetchall()
             
             conn.close()
             
+            result = []
+            for conv in conversations:
+                conv_type_map = {
+                    "account_positioning": "帳號定位",
+                    "topic_selection": "選題討論",
+                    "script_generation": "腳本生成",
+                    "general_consultation": "AI顧問",
+                    "ip_planning": "IP人設規劃"
+                }
+                result.append({
+                    "id": conv[0],
+                    "mode": conv_type_map.get(conv[1], conv[1]),
+                    "summary": conv[2] or "",
+                    "message_count": conv[3] or 0,
+                    "created_at": conv[4]
+                })
+            
             return {
                 "user_id": user_id,
-                "conversations": [
-                    {"summary": conv[0], "created_at": conv[1]} 
-                    for conv in conversations
-                ]
+                "conversations": result
             }
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -1306,19 +1411,33 @@ def create_app() -> FastAPI:
             conn = get_db_connection()
             cursor = conn.cursor()
             
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
             # 獲取該用戶的記錄數量來生成編號
-            cursor.execute("SELECT COUNT(*) FROM positioning_records WHERE user_id = ?", (user_id,))
+            if use_postgresql:
+                cursor.execute("SELECT COUNT(*) FROM positioning_records WHERE user_id = %s", (user_id,))
+            else:
+                cursor.execute("SELECT COUNT(*) FROM positioning_records WHERE user_id = ?", (user_id,))
             count = cursor.fetchone()[0]
             record_number = f"{count + 1:02d}"
             
             # 插入記錄
-            cursor.execute("""
-                INSERT INTO positioning_records (user_id, record_number, content)
-                VALUES (?, ?, ?)
-            """, (user_id, record_number, content))
+            if use_postgresql:
+                cursor.execute("""
+                    INSERT INTO positioning_records (user_id, record_number, content)
+                    VALUES (%s, %s, %s)
+                    RETURNING id
+                """, (user_id, record_number, content))
+                record_id = cursor.fetchone()[0]
+            else:
+                cursor.execute("""
+                    INSERT INTO positioning_records (user_id, record_number, content)
+                    VALUES (?, ?, ?)
+                """, (user_id, record_number, content))
+                conn.commit()
+                record_id = cursor.lastrowid
             
-            conn.commit()
-            record_id = cursor.lastrowid
             conn.close()
             
             return {
@@ -1336,12 +1455,23 @@ def create_app() -> FastAPI:
             conn = get_db_connection()
             cursor = conn.cursor()
             
-            cursor.execute("""
-                SELECT id, record_number, content, created_at
-                FROM positioning_records
-                WHERE user_id = ?
-                ORDER BY created_at DESC
-            """, (user_id,))
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT id, record_number, content, created_at
+                    FROM positioning_records
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                """, (user_id,))
+            else:
+                cursor.execute("""
+                    SELECT id, record_number, content, created_at
+                    FROM positioning_records
+                    WHERE user_id = ?
+                    ORDER BY created_at DESC
+                """, (user_id,))
             
             records = []
             for row in cursor.fetchall():
@@ -1364,8 +1494,16 @@ def create_app() -> FastAPI:
             conn = get_db_connection()
             cursor = conn.cursor()
             
-            cursor.execute("DELETE FROM positioning_records WHERE id = ?", (record_id,))
-            conn.commit()
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("DELETE FROM positioning_records WHERE id = %s", (record_id,))
+            else:
+                cursor.execute("DELETE FROM positioning_records WHERE id = ?", (record_id,))
+            
+            if not use_postgresql:
+                conn.commit()
             conn.close()
             
             return {"success": True}
@@ -1396,26 +1534,46 @@ def create_app() -> FastAPI:
                 conn = get_db_connection()
                 cursor = conn.cursor()
                 
+                database_url = os.getenv("DATABASE_URL")
+                use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+                
                 # 提取腳本標題作為預設名稱
                 script_name = script_data.get("title", "未命名腳本")
                 
                 # 插入腳本記錄
-                cursor.execute("""
-                    INSERT INTO user_scripts (user_id, script_name, title, content, script_data, platform, topic, profile)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    user_id,
-                    script_name,
-                    script_data.get("title", ""),
-                    content,
-                    json.dumps(script_data),
-                    platform,
-                    topic,
-                    profile
-                ))
+                if use_postgresql:
+                    cursor.execute("""
+                        INSERT INTO user_scripts (user_id, script_name, title, content, script_data, platform, topic, profile)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                    """, (
+                        user_id,
+                        script_name,
+                        script_data.get("title", ""),
+                        content,
+                        json.dumps(script_data),
+                        platform,
+                        topic,
+                        profile
+                    ))
+                    script_id = cursor.fetchone()[0]
+                else:
+                    cursor.execute("""
+                        INSERT INTO user_scripts (user_id, script_name, title, content, script_data, platform, topic, profile)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        user_id,
+                        script_name,
+                        script_data.get("title", ""),
+                        content,
+                        json.dumps(script_data),
+                        platform,
+                        topic,
+                        profile
+                    ))
+                    conn.commit()
+                    script_id = cursor.lastrowid
                 
-                conn.commit()
-                script_id = cursor.lastrowid
                 conn.close()
                 
                 return {
@@ -1445,12 +1603,23 @@ def create_app() -> FastAPI:
             conn = get_db_connection()
             cursor = conn.cursor()
             
-            cursor.execute("""
-                SELECT id, script_name, title, content, script_data, platform, topic, profile, created_at, updated_at
-                FROM user_scripts
-                WHERE user_id = ?
-                ORDER BY created_at DESC
-            """, (current_user_id,))
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT id, script_name, title, content, script_data, platform, topic, profile, created_at, updated_at
+                    FROM user_scripts
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                """, (current_user_id,))
+            else:
+                cursor.execute("""
+                    SELECT id, script_name, title, content, script_data, platform, topic, profile, created_at, updated_at
+                    FROM user_scripts
+                    WHERE user_id = ?
+                    ORDER BY created_at DESC
+                """, (current_user_id,))
             
             scripts = []
             for row in cursor.fetchall():
@@ -1489,8 +1658,14 @@ def create_app() -> FastAPI:
             conn = get_db_connection()
             cursor = conn.cursor()
             
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
             # 檢查腳本是否屬於當前用戶
-            cursor.execute("SELECT user_id FROM user_scripts WHERE id = ?", (script_id,))
+            if use_postgresql:
+                cursor.execute("SELECT user_id FROM user_scripts WHERE id = %s", (script_id,))
+            else:
+                cursor.execute("SELECT user_id FROM user_scripts WHERE id = ?", (script_id,))
             result = cursor.fetchone()
             
             if not result:
@@ -1500,13 +1675,21 @@ def create_app() -> FastAPI:
                 return JSONResponse({"error": "無權限修改此腳本"}, status_code=403)
             
             # 更新腳本名稱
-            cursor.execute("""
-                UPDATE user_scripts 
-                SET script_name = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-            """, (new_name, script_id))
+            if use_postgresql:
+                cursor.execute("""
+                    UPDATE user_scripts 
+                    SET script_name = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (new_name, script_id))
+            else:
+                cursor.execute("""
+                    UPDATE user_scripts 
+                    SET script_name = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (new_name, script_id))
             
-            conn.commit()
+            if not use_postgresql:
+                conn.commit()
             conn.close()
             
             return {"success": True, "message": "腳本名稱更新成功"}
@@ -1523,8 +1706,14 @@ def create_app() -> FastAPI:
             conn = get_db_connection()
             cursor = conn.cursor()
             
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
             # 檢查腳本是否屬於當前用戶
-            cursor.execute("SELECT user_id FROM user_scripts WHERE id = ?", (script_id,))
+            if use_postgresql:
+                cursor.execute("SELECT user_id FROM user_scripts WHERE id = %s", (script_id,))
+            else:
+                cursor.execute("SELECT user_id FROM user_scripts WHERE id = ?", (script_id,))
             result = cursor.fetchone()
             
             if not result:
@@ -1534,8 +1723,13 @@ def create_app() -> FastAPI:
                 return JSONResponse({"error": "無權限刪除此腳本"}, status_code=403)
             
             # 刪除腳本
-            cursor.execute("DELETE FROM user_scripts WHERE id = ?", (script_id,))
-            conn.commit()
+            if use_postgresql:
+                cursor.execute("DELETE FROM user_scripts WHERE id = %s", (script_id,))
+            else:
+                cursor.execute("DELETE FROM user_scripts WHERE id = ?", (script_id,))
+            
+            if not use_postgresql:
+                conn.commit()
             conn.close()
             
             return {"success": True, "message": "腳本刪除成功"}
@@ -1549,13 +1743,25 @@ def create_app() -> FastAPI:
             conn = get_db_connection()
             cursor = conn.cursor()
             
-            cursor.execute("""
-                SELECT behavior_type, COUNT(*) as count, MAX(created_at) as last_activity
-                FROM user_behaviors 
-                WHERE user_id = ? 
-                GROUP BY behavior_type
-                ORDER BY count DESC
-            """, (user_id,))
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT behavior_type, COUNT(*) as count, MAX(created_at) as last_activity
+                    FROM user_behaviors 
+                    WHERE user_id = %s 
+                    GROUP BY behavior_type
+                    ORDER BY count DESC
+                """, (user_id,))
+            else:
+                cursor.execute("""
+                    SELECT behavior_type, COUNT(*) as count, MAX(created_at) as last_activity
+                    FROM user_behaviors 
+                    WHERE user_id = ? 
+                    GROUP BY behavior_type
+                    ORDER BY count DESC
+                """, (user_id,))
             behaviors = cursor.fetchall()
             
             conn.close()
@@ -2698,11 +2904,22 @@ def create_app() -> FastAPI:
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT google_id, email, name, picture, is_subscribed, created_at 
-                FROM user_auth 
-                WHERE user_id = ?
-            """, (current_user_id,))
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT google_id, email, name, picture, is_subscribed, created_at 
+                    FROM user_auth 
+                    WHERE user_id = %s
+                """, (current_user_id,))
+            else:
+                cursor.execute("""
+                    SELECT google_id, email, name, picture, is_subscribed, created_at 
+                    FROM user_auth 
+                    WHERE user_id = ?
+                """, (current_user_id,))
             
             row = cursor.fetchone()
             conn.close()
@@ -2739,7 +2956,14 @@ def create_app() -> FastAPI:
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM user_profiles WHERE user_id = ?", (user_id,))
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("SELECT * FROM user_profiles WHERE user_id = %s", (user_id,))
+            else:
+                cursor.execute("SELECT * FROM user_profiles WHERE user_id = ?", (user_id,))
             row = cursor.fetchone()
             conn.close()
             
@@ -2765,39 +2989,73 @@ def create_app() -> FastAPI:
             conn = get_db_connection()
             cursor = conn.cursor()
             
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
             # 檢查是否已存在
-            cursor.execute("SELECT user_id FROM user_profiles WHERE user_id = ?", (profile.user_id,))
+            if use_postgresql:
+                cursor.execute("SELECT user_id FROM user_profiles WHERE user_id = %s", (profile.user_id,))
+            else:
+                cursor.execute("SELECT user_id FROM user_profiles WHERE user_id = ?", (profile.user_id,))
             exists = cursor.fetchone()
             
             if exists:
                 # 更新現有記錄
-                cursor.execute("""
-                    UPDATE user_profiles 
-                    SET preferred_platform = ?, preferred_style = ?, preferred_duration = ?, 
-                        content_preferences = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE user_id = ?
-                """, (
-                    profile.preferred_platform,
-                    profile.preferred_style,
-                    profile.preferred_duration,
-                    json.dumps(profile.content_preferences) if profile.content_preferences else None,
-                    profile.user_id
-                ))
+                if use_postgresql:
+                    cursor.execute("""
+                        UPDATE user_profiles 
+                        SET preferred_platform = %s, preferred_style = %s, preferred_duration = %s, 
+                            content_preferences = %s, updated_at = CURRENT_TIMESTAMP
+                        WHERE user_id = %s
+                    """, (
+                        profile.preferred_platform,
+                        profile.preferred_style,
+                        profile.preferred_duration,
+                        json.dumps(profile.content_preferences) if profile.content_preferences else None,
+                        profile.user_id
+                    ))
+                else:
+                    cursor.execute("""
+                        UPDATE user_profiles 
+                        SET preferred_platform = ?, preferred_style = ?, preferred_duration = ?, 
+                            content_preferences = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE user_id = ?
+                    """, (
+                        profile.preferred_platform,
+                        profile.preferred_style,
+                        profile.preferred_duration,
+                        json.dumps(profile.content_preferences) if profile.content_preferences else None,
+                        profile.user_id
+                    ))
             else:
                 # 創建新記錄
-                cursor.execute("""
-                    INSERT INTO user_profiles 
-                    (user_id, preferred_platform, preferred_style, preferred_duration, content_preferences)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (
-                    profile.user_id,
-                    profile.preferred_platform,
-                    profile.preferred_style,
-                    profile.preferred_duration,
-                    json.dumps(profile.content_preferences) if profile.content_preferences else None
-                ))
+                if use_postgresql:
+                    cursor.execute("""
+                        INSERT INTO user_profiles 
+                        (user_id, preferred_platform, preferred_style, preferred_duration, content_preferences)
+                        VALUES (%s, %s, %s, %s, %s)
+                    """, (
+                        profile.user_id,
+                        profile.preferred_platform,
+                        profile.preferred_style,
+                        profile.preferred_duration,
+                        json.dumps(profile.content_preferences) if profile.content_preferences else None
+                    ))
+                else:
+                    cursor.execute("""
+                        INSERT INTO user_profiles 
+                        (user_id, preferred_platform, preferred_style, preferred_duration, content_preferences)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (
+                        profile.user_id,
+                        profile.preferred_platform,
+                        profile.preferred_style,
+                        profile.preferred_duration,
+                        json.dumps(profile.content_preferences) if profile.content_preferences else None
+                    ))
             
-            conn.commit()
+            if not use_postgresql:
+                conn.commit()
             conn.close()
             return {"message": "Profile saved successfully", "user_id": profile.user_id}
         except Exception as e:
@@ -2817,8 +3075,14 @@ def create_app() -> FastAPI:
                 generation.topic
             )
             
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
             # 檢查是否已存在相同內容
-            cursor.execute("SELECT id FROM generations WHERE dedup_hash = ?", (dedup_hash,))
+            if use_postgresql:
+                cursor.execute("SELECT id FROM generations WHERE dedup_hash = %s", (dedup_hash,))
+            else:
+                cursor.execute("SELECT id FROM generations WHERE dedup_hash = ?", (dedup_hash,))
             existing = cursor.fetchone()
             
             if existing:
@@ -2833,19 +3097,33 @@ def create_app() -> FastAPI:
             generation_id = hashlib.md5(f"{generation.user_id}_{datetime.now().isoformat()}".encode()).hexdigest()[:12]
             
             # 保存新生成內容
-            cursor.execute("""
-                INSERT INTO generations (id, user_id, content, platform, topic, dedup_hash)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                generation_id,
-                generation.user_id,
-                generation.content,
-                generation.platform,
-                generation.topic,
-                dedup_hash
-            ))
+            if use_postgresql:
+                cursor.execute("""
+                    INSERT INTO generations (id, user_id, content, platform, topic, dedup_hash)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (
+                    generation_id,
+                    generation.user_id,
+                    generation.content,
+                    generation.platform,
+                    generation.topic,
+                    dedup_hash
+                ))
+            else:
+                cursor.execute("""
+                    INSERT INTO generations (id, user_id, content, platform, topic, dedup_hash)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    generation_id,
+                    generation.user_id,
+                    generation.content,
+                    generation.platform,
+                    generation.topic,
+                    dedup_hash
+                ))
             
-            conn.commit()
+            if not use_postgresql:
+                conn.commit()
             conn.close()
             
             return {
@@ -2863,13 +3141,25 @@ def create_app() -> FastAPI:
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, content, platform, topic, created_at 
-                FROM generations 
-                WHERE user_id = ? 
-                ORDER BY created_at DESC 
-                LIMIT ?
-            """, (user_id, limit))
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT id, content, platform, topic, created_at 
+                    FROM generations 
+                    WHERE user_id = %s 
+                    ORDER BY created_at DESC 
+                    LIMIT %s
+                """, (user_id, limit))
+            else:
+                cursor.execute("""
+                    SELECT id, content, platform, topic, created_at 
+                    FROM generations 
+                    WHERE user_id = ? 
+                    ORDER BY created_at DESC 
+                    LIMIT ?
+                """, (user_id, limit))
             
             rows = cursor.fetchall()
             conn.close()
