@@ -1,5 +1,39 @@
 # AI 短影音智能體 - 後端服務
 
+## 📌 專案整合報告（後端 ReelMindbackend）
+
+### 一、專案總覽（角色與資料流）
+- **角色定位**：FastAPI 核心服務，承載 OAuth、聊天/生成（含 SSE）、資料持久化（SQLite/PostgreSQL）、管理端 API、訂單/授權 API。
+- **資料流**：
+  - 前端呼叫 `/api/auth/*` 完成登入；自動註冊 `user_auth`
+  - `/api/chat/stream` 串流回覆並寫入 `conversation_summaries`
+  - `/api/scripts/*` 與 `generations`、`user_scripts`、`positioning_records` 等表互動
+  - 帳單與授權：`/api/user/orders/{id}`、`/api/user/license/{id}`、`/api/admin/orders`
+
+### 二、目前擁有功能（重點）
+- ✅ PostgreSQL/SQLite 雙棧自動切換、方言相容（日期/佔位符/UPSERT）
+- ✅ 管理端 API：模式統計、對話/腳本清單、分析、CSV 匯出
+- ✅ 帳單/授權表與 API：`orders`、`licenses`（查詢已上線）
+- ✅ OAuth 修復：`ON CONFLICT` 與 `expires_at` 類型處理
+
+### 三、系統架構與資料流（簡）
+- 後端（本專案）←→ PostgreSQL（Zeabur）
+- 提供前端與後台管理兩端使用之統一 API
+
+### 四、尚未解決/待辦（Back）
+- ⏳ 金流整合（ECPay/序號）：新增 `/api/payment/*`、驗簽、回傳、落單、開立發票欄位
+- ⏳ Admin 權限強化：加入管理員 JWT/白名單、速率限制
+- ⏳ 訂單 CSV 匯出端點 `/api/admin/export/orders`
+
+### 五、已解決重點（Back）
+- ✅ `INSERT OR REPLACE` → PostgreSQL `ON CONFLICT ... DO UPDATE`
+- ✅ `expires_at` 類型修復（timestamp vs numeric）
+- ✅ 日期函式相容（`datetime('now')` → `CURRENT_TIMESTAMP` / `INTERVAL`）
+- ✅ 加入 `orders`、`licenses` 表，並提供查詢 API
+
+---
+（以下為原 README 內容）
+
 ## ⚠️ 重要問題 - 優先解決
 
 ### 🚨 腳本儲存系統問題
