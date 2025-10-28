@@ -6,6 +6,7 @@ import secrets
 import asyncio
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Iterable
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +17,16 @@ from dotenv import load_dotenv
 import httpx
 
 import google.generativeai as genai
+
+# PostgreSQL 支援
+try:
+    import psycopg2
+    from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+    PSYCOPG2_AVAILABLE = True
+except ImportError:
+    PSYCOPG2_AVAILABLE = False
+    print("WARNING: psycopg2 未安裝，將使用 SQLite")
+
 
 # 導入新的記憶系統模組
 from memory import stm
@@ -102,20 +113,57 @@ JWT_SECRET = os.getenv("JWT_SECRET", secrets.token_urlsafe(32))
 security = HTTPBearer()
 
 
+# SQL 語法轉換輔助函數
+def convert_sql_for_postgresql(sql: str) -> str:
+    """將 SQLite 語法轉換為 PostgreSQL 語法"""
+    # 轉換 AUTOINCREMENT
+    sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+    sql = sql.replace("AUTOINCREMENT", "")
+    
+    # 轉換 TEXT 和 VARCHAR
+    # 保留 TEXT 類型（PostgreSQL 也支援）
+    # 但主鍵用 VARCHAR
+    if "PRIMARY KEY" in sql:
+        sql = sql.replace("TEXT PRIMARY KEY", "VARCHAR(255) PRIMARY KEY")
+    
+    # INTEGER -> INTEGER (PostgreSQL 也支援)
+    # REAL -> REAL (PostgreSQL 也支援)
+    
+    return sql
+
+
 # 數據庫初始化
 def init_database():
-    """初始化 SQLite 數據庫"""
-    # 優先使用環境變數指定的路徑（持久化存儲）
-    db_dir = os.getenv("DATABASE_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
-    db_path = os.path.join(db_dir, "chatbot.db")
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    print(f"INFO: 資料庫路徑: {db_path}")
+    """初始化資料庫（支援 PostgreSQL 和 SQLite）"""
+    database_url = os.getenv("DATABASE_URL")
     
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
+    # 判斷使用哪種資料庫
+    use_postgresql = False
+    conn = None
+    
+    if database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE:
+        use_postgresql = True
+        print(f"INFO: 初始化 PostgreSQL 資料庫")
+        conn = psycopg2.connect(database_url)
+        conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+        cursor = conn.cursor()
+    else:
+        # 使用 SQLite
+        db_dir = os.getenv("DATABASE_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
+        db_path = os.path.join(db_dir, "chatbot.db")
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        print(f"INFO: 初始化 SQLite 資料庫: {db_path}")
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+    
+    # 輔助函數：執行 SQL 並自動轉換語法
+    def execute_sql(sql: str):
+        if use_postgresql:
+            sql = convert_sql_for_postgresql(sql)
+        cursor.execute(sql)
     
     # 創建用戶偏好表
-    cursor.execute("""
+    execute_sql("""
         CREATE TABLE IF NOT EXISTS user_profiles (
             user_id TEXT PRIMARY KEY,
             preferred_platform TEXT,
@@ -128,7 +176,7 @@ def init_database():
     """)
     
     # 創建生成內容表
-    cursor.execute("""
+    execute_sql("""
         CREATE TABLE IF NOT EXISTS generations (
             id TEXT PRIMARY KEY,
             user_id TEXT,
@@ -142,7 +190,7 @@ def init_database():
     """)
     
     # 創建對話摘要表
-    cursor.execute("""
+    execute_sql("""
         CREATE TABLE IF NOT EXISTS conversation_summaries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT NOT NULL,
@@ -154,7 +202,7 @@ def init_database():
     """)
     
     # 創建用戶偏好追蹤表
-    cursor.execute("""
+    execute_sql("""
         CREATE TABLE IF NOT EXISTS user_preferences (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT NOT NULL,
@@ -169,7 +217,7 @@ def init_database():
     """)
     
     # 創建用戶行為記錄表
-    cursor.execute("""
+    execute_sql("""
         CREATE TABLE IF NOT EXISTS user_behaviors (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT NOT NULL,
@@ -181,7 +229,7 @@ def init_database():
     """)
     
     # 創建用戶認證表
-    cursor.execute("""
+    execute_sql("""
         CREATE TABLE IF NOT EXISTS user_auth (
             user_id TEXT PRIMARY KEY,
             google_id TEXT UNIQUE,
@@ -212,7 +260,7 @@ def init_database():
         print(f"INFO: 已將 {updated_count} 個用戶設為已訂閱")
     
     # 創建帳號定位記錄表
-    cursor.execute("""
+    execute_sql("""
         CREATE TABLE IF NOT EXISTS positioning_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT NOT NULL,
@@ -224,7 +272,7 @@ def init_database():
     """)
     
     # 創建腳本儲存表
-    cursor.execute("""
+    execute_sql("""
         CREATE TABLE IF NOT EXISTS user_scripts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT NOT NULL,
@@ -241,16 +289,40 @@ def init_database():
         )
     """)
     
-    conn.commit()
-    conn.close()
-    return db_path
+    # PostgreSQL 使用 AUTOCOMMIT，不需要 commit
+    # SQLite 需要 commit
+    if not use_postgresql:
+        conn.commit()
+        conn.close()
+    
+    if use_postgresql:
+        conn.close()
+        return "PostgreSQL"
+    else:
+        return db_path
 
 
 def get_db_connection():
-    """獲取數據庫連接"""
-    # 使用相同的資料庫路徑邏輯
+    """獲取數據庫連接（支援 PostgreSQL 和 SQLite）"""
+    database_url = os.getenv("DATABASE_URL")
+    
+    # 如果有 DATABASE_URL 且包含 postgresql://，使用 PostgreSQL
+    if database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE:
+        try:
+            print(f"INFO: 連接到 PostgreSQL 資料庫")
+            conn = psycopg2.connect(database_url)
+            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+            return conn
+        except Exception as e:
+            print(f"ERROR: PostgreSQL 連接失敗: {e}")
+            raise
+    
+    # 預設使用 SQLite
     db_dir = os.getenv("DATABASE_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
     db_path = os.path.join(db_dir, "chatbot.db")
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    
+    print(f"INFO: 連接到 SQLite 資料庫: {db_path}")
     conn = sqlite3.connect(db_path, timeout=30.0)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
