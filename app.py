@@ -1612,6 +1612,46 @@ def create_app() -> FastAPI:
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
     
+    @app.put("/api/admin/users/{user_id}/subscription")
+    async def update_user_subscription(user_id: str, request: Request):
+        """更新用戶訂閱狀態（管理員用）"""
+        try:
+            data = await request.json()
+            is_subscribed = data.get("is_subscribed", 0)
+            
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # 更新訂閱狀態
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("""
+                    UPDATE user_auth 
+                    SET is_subscribed = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = %s
+                """, (1 if is_subscribed else 0, user_id))
+            else:
+                cursor.execute("""
+                    UPDATE user_auth 
+                    SET is_subscribed = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = ?
+                """, (1 if is_subscribed else 0, user_id))
+            
+            if not use_postgresql:
+                conn.commit()
+            conn.close()
+            
+            return {
+                "success": True,
+                "message": "訂閱狀態已更新",
+                "user_id": user_id,
+                "is_subscribed": bool(is_subscribed)
+            }
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
     @app.get("/api/admin/user/{user_id}/data")
     async def get_user_complete_data(user_id: str):
         """獲取指定用戶的完整資料（管理員用）"""
@@ -1842,6 +1882,449 @@ def create_app() -> FastAPI:
                     for stat in platform_stats
                 ]
             }
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.get("/api/admin/mode-statistics")
+    async def get_mode_statistics():
+        """獲取模式使用統計"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 獲取各模式的對話數
+            cursor.execute("""
+                SELECT conversation_type, COUNT(*) as count
+                FROM conversation_summaries
+                WHERE conversation_type IS NOT NULL
+                GROUP BY conversation_type
+            """)
+            conversations = cursor.fetchall()
+            
+            # 計算各模式統計
+            mode_stats = {
+                "mode1_quick_generate": {"count": 0, "success_rate": 0},
+                "mode2_ai_consultant": {"count": 0, "avg_turns": 0},
+                "mode3_ip_planning": {"count": 0, "profiles_generated": 0}
+            }
+            
+            # 根據對話類型分類
+            for conv_type, count in conversations:
+                if conv_type == "account_positioning":
+                    mode_stats["mode1_quick_generate"]["count"] = count
+                elif conv_type in ["topic_selection", "script_generation"]:
+                    mode_stats["mode2_ai_consultant"]["count"] += count
+                elif conv_type == "general_consultation":
+                    mode_stats["mode2_ai_consultant"]["count"] += count
+            
+            # 獲取時間分布
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT DATE_TRUNC('hour', created_at) as hour, COUNT(*) as count
+                    FROM conversation_summaries
+                    WHERE created_at >= CURRENT_TIMESTAMP - INTERVAL '30 days'
+                    GROUP BY hour
+                    ORDER BY hour
+                """)
+            else:
+                cursor.execute("""
+                    SELECT strftime('%H', created_at) as hour, COUNT(*) as count
+                    FROM conversation_summaries
+                    WHERE created_at >= datetime('now', '-30 days')
+                    GROUP BY hour
+                    ORDER BY hour
+                """)
+            
+            time_stats = {"00:00-06:00": 0, "06:00-12:00": 0, "12:00-18:00": 0, "18:00-24:00": 0}
+            for row in cursor.fetchall():
+                try:
+                    if use_postgresql:
+                        # PostgreSQL 返回 datetime 對象
+                        hour_str = row[0].strftime('%H')
+                    else:
+                        # SQLite 返回字符串 'HH' 格式
+                        hour_str = str(row[0])[:2]
+                    hour = int(hour_str)
+                except:
+                    hour = 0
+                
+                count = row[1]
+                if 0 <= hour < 6:
+                    time_stats["00:00-06:00"] += count
+                elif 6 <= hour < 12:
+                    time_stats["06:00-12:00"] += count
+                elif 12 <= hour < 18:
+                    time_stats["12:00-18:00"] += count
+                else:
+                    time_stats["18:00-24:00"] += count
+            
+            conn.close()
+            
+            return {
+                "mode_stats": mode_stats,
+                "time_distribution": time_stats
+            }
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.get("/api/admin/generations")
+    async def get_all_generations():
+        """獲取所有生成記錄"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT g.id, g.user_id, g.platform, g.topic, g.content, g.created_at, 
+                       u.name, u.email
+                FROM generations g
+                LEFT JOIN user_auth u ON g.user_id = u.user_id
+                ORDER BY g.created_at DESC
+                LIMIT 100
+            """)
+            
+            generations = []
+            for row in cursor.fetchall():
+                generations.append({
+                    "id": row[0],
+                    "user_id": row[1],
+                    "user_name": row[6] or "未知用戶",
+                    "user_email": row[7] or "",
+                    "platform": row[2] or "未設定",
+                    "topic": row[3] or "未分類",
+                    "type": "生成記錄",
+                    "content": row[4][:100] if row[4] else "",
+                    "created_at": row[5]
+                })
+            
+            conn.close()
+            
+            return {"generations": generations}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.get("/api/admin/platform-statistics")
+    async def get_platform_statistics():
+        """獲取平台使用統計"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT platform, COUNT(*) as count
+                FROM user_scripts
+                WHERE platform IS NOT NULL
+                GROUP BY platform
+                ORDER BY count DESC
+            """)
+            
+            platform_stats = [{"platform": row[0], "count": row[1]} for row in cursor.fetchall()]
+            
+            conn.close()
+            
+            return {"platform_stats": platform_stats}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.get("/api/admin/user-activities")
+    async def get_user_activities():
+        """獲取最近用戶活動"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # 獲取最近10個活動
+            activities = []
+            
+            # 最近註冊的用戶
+            cursor.execute("""
+                SELECT user_id, name, created_at
+                FROM user_auth
+                ORDER BY created_at DESC
+                LIMIT 3
+            """)
+            for row in cursor.fetchall():
+                activities.append({
+                    "type": "新用戶註冊",
+                    "user_id": row[0],
+                    "name": row[1] or "未知用戶",
+                    "time": row[2],
+                    "icon": "👤"
+                })
+            
+            # 最近的腳本生成
+            cursor.execute("""
+                SELECT us.user_id, us.title, us.created_at, ua.name
+                FROM user_scripts us
+                LEFT JOIN user_auth ua ON us.user_id = ua.user_id
+                ORDER BY us.created_at DESC
+                LIMIT 3
+            """)
+            for row in cursor.fetchall():
+                activities.append({
+                    "type": "新腳本生成",
+                    "user_id": row[0],
+                    "name": row[3] or "未知用戶",
+                    "title": row[1] or "未命名腳本",
+                    "time": row[2],
+                    "icon": "📝"
+                })
+            
+            # 最近的對話
+            cursor.execute("""
+                SELECT cs.user_id, cs.conversation_type, cs.created_at, ua.name
+                FROM conversation_summaries cs
+                LEFT JOIN user_auth ua ON cs.user_id = ua.user_id
+                ORDER BY cs.created_at DESC
+                LIMIT 3
+            """)
+            for row in cursor.fetchall():
+                mode_map = {
+                    "account_positioning": "帳號定位",
+                    "topic_selection": "選題討論",
+                    "script_generation": "腳本生成",
+                    "general_consultation": "AI顧問對話"
+                }
+                activities.append({
+                    "type": f"{mode_map.get(row[1], '對話')}",
+                    "user_id": row[0],
+                    "name": row[3] or "未知用戶",
+                    "time": row[2],
+                    "icon": "💬"
+                })
+            
+            # 按時間排序
+            activities.sort(key=lambda x: x['time'], reverse=True)
+            activities = activities[:10]
+            
+            conn.close()
+            
+            return {"activities": activities}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.get("/api/admin/analytics-data")
+    async def get_analytics_data():
+        """獲取分析頁面所需的所有數據"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 平台使用分布
+            cursor.execute("""
+                SELECT platform, COUNT(*) as count
+                FROM user_scripts
+                WHERE platform IS NOT NULL
+                GROUP BY platform
+                ORDER BY count DESC
+            """)
+            platform_stats = cursor.fetchall()
+            platform_labels = [row[0] for row in platform_stats]
+            platform_data = [row[1] for row in platform_stats]
+            
+            # 時間段使用分析（最近30天）
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT DATE_TRUNC('day', created_at) as date, COUNT(*) as count
+                    FROM user_scripts
+                    WHERE created_at >= CURRENT_TIMESTAMP - INTERVAL '30 days'
+                    GROUP BY date
+                    ORDER BY date
+                """)
+            else:
+                cursor.execute("""
+                    SELECT DATE(created_at) as date, COUNT(*) as count
+                    FROM user_scripts
+                    WHERE created_at >= datetime('now', '-30 days')
+                    GROUP BY date
+                    ORDER BY date
+                """)
+            
+            daily_usage = {}
+            for row in cursor.fetchall():
+                try:
+                    if use_postgresql:
+                        # PostgreSQL 返回 date 對象
+                        day_name = row[0].strftime('%a')
+                    else:
+                        # SQLite 返回 'YYYY-MM-DD' 字符串
+                        from datetime import datetime
+                        date_str = str(row[0])
+                        day_obj = datetime.strptime(date_str, '%Y-%m-%d')
+                        day_name = day_obj.strftime('%a')
+                except:
+                    day_name = 'Mon'
+                
+                daily_usage[day_name] = daily_usage.get(day_name, 0) + row[1]
+            
+            # 內容類型分布（根據 topic 分類）
+            cursor.execute("""
+                SELECT topic, COUNT(*) as count
+                FROM user_scripts
+                WHERE topic IS NOT NULL AND topic != ''
+                GROUP BY topic
+                ORDER BY count DESC
+                LIMIT 5
+            """)
+            content_types = cursor.fetchall()
+            content_labels = [row[0] for row in content_types]
+            content_data = [row[1] for row in content_types]
+            
+            # 用戶活躍度（最近4週）
+            weekly_activity = []
+            for i in range(4):
+                if use_postgresql:
+                    cursor.execute(f"""
+                        SELECT COUNT(DISTINCT user_id)
+                        FROM user_scripts
+                        WHERE created_at >= CURRENT_TIMESTAMP - INTERVAL '{7 * (i + 1)} days'
+                          AND created_at < CURRENT_TIMESTAMP - INTERVAL '{7 * i} days'
+                    """)
+                else:
+                    cursor.execute(f"""
+                        SELECT COUNT(DISTINCT user_id)
+                        FROM user_scripts
+                        WHERE created_at >= datetime('now', '-{7 * (i + 1)} days')
+                          AND created_at < datetime('now', '-{7 * i} days')
+                    """)
+                count = cursor.fetchone()[0]
+                weekly_activity.append(count)
+            
+            conn.close()
+            
+            return {
+                "platform": {
+                    "labels": platform_labels,
+                    "data": platform_data
+                },
+                "time_usage": {
+                    "labels": ['週一', '週二', '週三', '週四', '週五', '週六', '週日'],
+                    "data": [
+                        daily_usage.get('Mon', 0),
+                        daily_usage.get('Tue', 0),
+                        daily_usage.get('Wed', 0),
+                        daily_usage.get('Thu', 0),
+                        daily_usage.get('Fri', 0),
+                        daily_usage.get('Sat', 0),
+                        daily_usage.get('Sun', 0)
+                    ]
+                },
+                "activity": {
+                    "labels": ['第1週', '第2週', '第3週', '第4週'],
+                    "data": weekly_activity
+                },
+                "content_type": {
+                    "labels": content_labels,
+                    "data": content_data
+                }
+            }
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.get("/api/admin/export/{export_type}")
+    async def export_csv(export_type: str):
+        """匯出 CSV 檔案"""
+        import csv
+        import io
+        
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # 根據匯出類型選擇不同的數據
+            if export_type == "users":
+                cursor.execute("""
+                    SELECT user_id, name, email, created_at, is_subscribed
+                    FROM user_auth
+                    ORDER BY created_at DESC
+                """)
+                
+                # 創建 CSV
+                output = io.StringIO()
+                writer = csv.writer(output)
+                writer.writerow(['用戶ID', '姓名', 'Email', '註冊時間', '是否訂閱'])
+                for row in cursor.fetchall():
+                    writer.writerow(row)
+                output.seek(0)
+                
+                return Response(
+                    content=output.getvalue(),
+                    media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=users.csv"}
+                )
+            
+            elif export_type == "scripts":
+                cursor.execute("""
+                    SELECT us.id, ua.name, us.platform, us.topic, us.title, us.created_at
+                    FROM user_scripts us
+                    LEFT JOIN user_auth ua ON us.user_id = ua.user_id
+                    ORDER BY us.created_at DESC
+                """)
+                
+                output = io.StringIO()
+                writer = csv.writer(output)
+                writer.writerow(['腳本ID', '用戶名稱', '平台', '主題', '標題', '創建時間'])
+                for row in cursor.fetchall():
+                    writer.writerow(row)
+                output.seek(0)
+                
+                return Response(
+                    content=output.getvalue(),
+                    media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=scripts.csv"}
+                )
+            
+            elif export_type == "conversations":
+                cursor.execute("""
+                    SELECT cs.id, ua.name, cs.conversation_type, cs.summary, cs.created_at
+                    FROM conversation_summaries cs
+                    LEFT JOIN user_auth ua ON cs.user_id = ua.user_id
+                    ORDER BY cs.created_at DESC
+                """)
+                
+                output = io.StringIO()
+                writer = csv.writer(output)
+                writer.writerow(['對話ID', '用戶名稱', '對話類型', '摘要', '創建時間'])
+                for row in cursor.fetchall():
+                    writer.writerow(row)
+                output.seek(0)
+                
+                return Response(
+                    content=output.getvalue(),
+                    media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=conversations.csv"}
+                )
+            
+            elif export_type == "generations":
+                cursor.execute("""
+                    SELECT g.id, ua.name, g.platform, g.topic, g.content, g.created_at
+                    FROM generations g
+                    LEFT JOIN user_auth ua ON g.user_id = ua.user_id
+                    ORDER BY g.created_at DESC
+                """)
+                
+                output = io.StringIO()
+                writer = csv.writer(output)
+                writer.writerow(['生成ID', '用戶名稱', '平台', '主題', '內容', '創建時間'])
+                for row in cursor.fetchall():
+                    writer.writerow(row)
+                output.seek(0)
+                
+                return Response(
+                    content=output.getvalue(),
+                    media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=generations.csv"}
+                )
+            
+            else:
+                return JSONResponse({"error": "無效的匯出類型"}, status_code=400)
+        
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
