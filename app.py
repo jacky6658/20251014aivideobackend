@@ -4,7 +4,7 @@ import hashlib
 import sqlite3
 import secrets
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Iterable
 from urllib.parse import urlparse
 
@@ -3772,125 +3772,62 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/auth/refresh")
-    async def refresh_token(request: Request):
-        """刷新存取權杖（不依賴現有 Authorization）
-        請求體可傳入 {"user_id": "..."}；若未提供，嘗試從 Authorization 解析。
-        生成新的應用 access_token（非 Google token），有效期 1 小時。
-        """
+    async def refresh_token(
+        current_user_id: Optional[str] = Depends(get_current_user)
+    ):
+        """刷新存取權杖"""
+        if not current_user_id:
+            raise HTTPException(status_code=401, detail="未授權")
+        
         try:
-            body = {}
-            try:
-                body = await request.json()
-            except Exception:
-                body = {}
-
-            user_id = (body or {}).get("user_id")
-
-            # 若未傳 user_id，嘗試從 Authorization 解出（即便過期也可能解不出）
-            if not user_id:
-                auth_hdr = request.headers.get("Authorization", "")
-                if auth_hdr.startswith("Bearer "):
-                    token = auth_hdr.split(" ", 1)[1]
-                    # 嘗試驗證（過期會失敗），忽略失敗繼續
-                    user_id = verify_access_token(token) or None
-
-            if not user_id:
-                raise HTTPException(status_code=401, detail="未授權")
-
-            # 確認用戶存在
+            # 獲取資料庫連接
             conn = get_db_connection()
             cursor = conn.cursor()
+            
             database_url = os.getenv("DATABASE_URL")
             use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
-
+            
+            # 從資料庫獲取用戶的 refresh token（如果需要）
+            # 但實際上我們直接生成新的 access token
             if use_postgresql:
-                cursor.execute("SELECT user_id FROM user_auth WHERE user_id = %s", (user_id,))
+                cursor.execute("SELECT user_id FROM user_auth WHERE user_id = %s", (current_user_id,))
             else:
-                cursor.execute("SELECT user_id FROM user_auth WHERE user_id = ?", (user_id,))
+                cursor.execute("SELECT user_id FROM user_auth WHERE user_id = ?", (current_user_id,))
+            
             if not cursor.fetchone():
                 conn.close()
                 raise HTTPException(status_code=404, detail="用戶不存在")
-
-            # 生成新的應用 access token
-            new_access_token = generate_access_token(user_id)
-            new_expires_at = datetime.now().timestamp() + 3600
-
-            # 寫入 expires_at（以維持欄位一致），不依賴外部 OAuth
+            
+            # 生成新的 access token
+            new_access_token = generate_access_token(current_user_id)
+            new_expires_at = datetime.now() + timedelta(hours=1)
+            
+            # 更新資料庫中的 token
             if use_postgresql:
-                cursor.execute(
-                    """
-                    UPDATE user_auth SET access_token = %s, expires_at = %s, updated_at = CURRENT_TIMESTAMP
+                cursor.execute("""
+                    UPDATE user_auth 
+                    SET access_token = %s, expires_at = %s, updated_at = CURRENT_TIMESTAMP
                     WHERE user_id = %s
-                    """,
-                    (new_access_token, datetime.now(), user_id)
-                )
+                """, (new_access_token, new_expires_at, current_user_id))
             else:
-                cursor.execute(
-                    """
-                    UPDATE user_auth SET access_token = ?, expires_at = ?, updated_at = CURRENT_TIMESTAMP
+                cursor.execute("""
+                    UPDATE user_auth 
+                    SET access_token = ?, expires_at = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE user_id = ?
-                    """,
-                    (new_access_token, new_expires_at, user_id)
-                )
+                """, (new_access_token, new_expires_at.isoformat(), current_user_id))
                 conn.commit()
+            
             conn.close()
-
-            return {"access_token": new_access_token, "expires_in": 3600}
+            
+            return {
+                "access_token": new_access_token,
+                "expires_at": new_expires_at.isoformat()
+            }
+                
         except HTTPException:
             raise
         except Exception as e:
             print(f"刷新 token 錯誤: {e}")
-            raise HTTPException(status_code=500, detail="內部伺服器錯誤")
-
-    # 兼容路徑：/api/auth/token/refresh（與上面相同行為）
-    @app.post("/api/auth/token/refresh")
-    async def refresh_token_compat(request: Request):
-        try:
-            body = {}
-            try:
-                body = await request.json()
-            except Exception:
-                body = {}
-            user_id = (body or {}).get("user_id")
-            if not user_id:
-                auth_hdr = request.headers.get("Authorization", "")
-                if auth_hdr.startswith("Bearer "):
-                    token = auth_hdr.split(" ", 1)[1]
-                    user_id = verify_access_token(token) or None
-            if not user_id:
-                raise HTTPException(status_code=401, detail="未授權")
-
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            database_url = os.getenv("DATABASE_URL")
-            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
-            if use_postgresql:
-                cursor.execute("SELECT user_id FROM user_auth WHERE user_id = %s", (user_id,))
-            else:
-                cursor.execute("SELECT user_id FROM user_auth WHERE user_id = ?", (user_id,))
-            if not cursor.fetchone():
-                conn.close()
-                raise HTTPException(status_code=404, detail="用戶不存在")
-
-            new_access_token = generate_access_token(user_id)
-            new_expires_at = datetime.now().timestamp() + 3600
-            if use_postgresql:
-                cursor.execute(
-                    "UPDATE user_auth SET access_token = %s, expires_at = %s, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s",
-                    (new_access_token, datetime.now(), user_id)
-                )
-            else:
-                cursor.execute(
-                    "UPDATE user_auth SET access_token = ?, expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
-                    (new_access_token, new_expires_at, user_id)
-                )
-                conn.commit()
-            conn.close()
-            return {"access_token": new_access_token, "expires_in": 3600}
-        except HTTPException:
-            raise
-        except Exception as e:
-            print(f"刷新 token 兼容路徑錯誤: {e}")
             raise HTTPException(status_code=500, detail="內部伺服器錯誤")
 
     @app.get("/api/auth/me")
