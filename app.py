@@ -594,6 +594,26 @@ def save_conversation_summary(user_id: str, user_message: str, ai_response: str)
         database_url = os.getenv("DATABASE_URL")
         use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
 
+        # 確保 user_profiles 存在該 user_id（修復外鍵約束錯誤）
+        if use_postgresql:
+            cursor.execute("SELECT user_id FROM user_profiles WHERE user_id = %s", (user_id,))
+        else:
+            cursor.execute("SELECT user_id FROM user_profiles WHERE user_id = ?", (user_id,))
+        
+        if not cursor.fetchone():
+            # 如果不存在，自動創建
+            if use_postgresql:
+                cursor.execute("""
+                    INSERT INTO user_profiles (user_id, created_at)
+                    VALUES (%s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (user_id) DO NOTHING
+                """, (user_id,))
+            else:
+                cursor.execute("""
+                    INSERT OR IGNORE INTO user_profiles (user_id, created_at)
+                    VALUES (?, CURRENT_TIMESTAMP)
+                """, (user_id,))
+
         # 智能摘要生成
         summary = generate_smart_summary(user_message, ai_response)
         conversation_type = classify_conversation(user_message, ai_response)
