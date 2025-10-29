@@ -2023,6 +2023,92 @@ def create_app() -> FastAPI:
             return {"memories": memories}
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
+
+    # 取得單筆長期記憶（管理員用）
+    @app.get("/api/admin/long-term-memory/{memory_id}")
+    async def get_long_term_memory_by_id(memory_id: int):
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+
+            if use_postgresql:
+                cursor.execute(
+                    """
+                    SELECT ltm.id, ltm.user_id, ltm.conversation_type, ltm.session_id,
+                           ltm.message_role, ltm.message_content, ltm.metadata, ltm.created_at,
+                           ua.name, ua.email
+                    FROM long_term_memory ltm
+                    LEFT JOIN user_auth ua ON ltm.user_id = ua.user_id
+                    WHERE ltm.id = %s
+                    """,
+                    (memory_id,)
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT ltm.id, ltm.user_id, ltm.conversation_type, ltm.session_id,
+                           ltm.message_role, ltm.message_content, ltm.metadata, ltm.created_at,
+                           ua.name, ua.email
+                    FROM long_term_memory ltm
+                    LEFT JOIN user_auth ua ON ltm.user_id = ua.user_id
+                    WHERE ltm.id = ?
+                    """,
+                    (memory_id,)
+                )
+
+            row = cursor.fetchone()
+            conn.close()
+            if not row:
+                return JSONResponse({"error": "記錄不存在"}, status_code=404)
+
+            return {
+                "id": row[0],
+                "user_id": row[1],
+                "conversation_type": row[2],
+                "session_id": row[3],
+                "message_role": row[4],
+                "message_content": row[5],
+                "metadata": row[6],
+                "created_at": row[7],
+                "user_name": row[8],
+                "user_email": row[9]
+            }
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    # 刪除單筆長期記憶（管理員用）
+    @app.delete("/api/admin/long-term-memory/{memory_id}")
+    async def delete_long_term_memory(memory_id: int):
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+
+            # 檢查存在
+            if use_postgresql:
+                cursor.execute("SELECT id FROM long_term_memory WHERE id = %s", (memory_id,))
+            else:
+                cursor.execute("SELECT id FROM long_term_memory WHERE id = ?", (memory_id,))
+            if not cursor.fetchone():
+                conn.close()
+                return JSONResponse({"error": "記錄不存在"}, status_code=404)
+
+            # 刪除
+            if use_postgresql:
+                cursor.execute("DELETE FROM long_term_memory WHERE id = %s", (memory_id,))
+            else:
+                cursor.execute("DELETE FROM long_term_memory WHERE id = ?", (memory_id,))
+                conn.commit()
+
+            conn.close()
+            return {"success": True}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.get("/api/admin/memory-stats")
     async def get_memory_stats():
