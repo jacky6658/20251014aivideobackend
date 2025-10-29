@@ -3636,36 +3636,75 @@ def create_app() -> FastAPI:
                     </div>
                     <script>
                         (function() {{
+                            console.log('DEBUG: Auth callback script executing');
+                            console.log('DEBUG: window.opener exists:', !!window.opener);
+                            
                             try {{
+                                // 準備訊息對象
+                                var message = {{
+                                    type: 'GOOGLE_AUTH_SUCCESS',
+                                    accessToken: '{safe_token}',
+                                    user: {{
+                                        id: '{safe_user_id}',
+                                        user_id: '{safe_user_id}',
+                                        email: '{safe_email}',
+                                        name: '{safe_name}',
+                                        picture: '{safe_picture}'
+                                    }}
+                                }};
+                                console.log('DEBUG: Message to send:', message);
+                                
+                                // 嘗試發送 postMessage（不檢查 opener.closed，避免 COOP 錯誤）
                                 if (window.opener) {{
-                                    window.opener.postMessage({{
-                                        type: 'GOOGLE_AUTH_SUCCESS',
-                                        accessToken: '{safe_token}',
-                                        user: {{
-                                            id: '{safe_user_id}',
-                                            email: '{safe_email}',
-                                            name: '{safe_name}',
-                                            picture: '{safe_picture}'
-                                        }}
-                                    }}, '*');
+                                    console.log('DEBUG: window.opener exists, sending postMessage');
+                                    // 嘗試多次發送，確保訊息被接收
+                                    try {{
+                                        window.opener.postMessage(message, '*');
+                                        setTimeout(function() {{
+                                            try {{
+                                                window.opener.postMessage(message, '*');
+                                            }} catch (e2) {{
+                                                console.log('DEBUG: Second postMessage attempt failed:', e2);
+                                            }}
+                                        }}, 100);
+                                        setTimeout(function() {{
+                                            try {{
+                                                window.opener.postMessage(message, '*');
+                                            }} catch (e3) {{
+                                                console.log('DEBUG: Third postMessage attempt failed:', e3);
+                                            }}
+                                        }}, 500);
+                                    }} catch (postErr) {{
+                                        console.warn('DEBUG: postMessage failed, will redirect:', postErr);
+                                        // postMessage 失敗，使用重定向作為 fallback
+                                        window.location.href = 'https://aivideonew.zeabur.app/?token={safe_token}&user_id={safe_user_id}&email={safe_email}&name={safe_name}&picture={safe_picture}';
+                                    }}
+                                    
+                                    // 延遲關閉視窗，確保訊息已發送
                                     setTimeout(function() {{
                                         try {{
                                             window.close();
                                         }} catch (e) {{
-                                            console.log('Unable to close window:', e);
+                                            console.log('DEBUG: Unable to close window:', e);
                                         }}
-                                    }}, 1000);
+                                    }}, 1500);
                                 }} else {{
+                                    console.log('DEBUG: No window.opener, redirecting directly');
                                     // 如果不是 popup，導向前端首頁並附帶 token
                                     window.location.href = 'https://aivideonew.zeabur.app/?token={safe_token}&user_id={safe_user_id}&email={safe_email}&name={safe_name}&picture={safe_picture}';
                                 }}
                             }} catch (e) {{
                                 console.error('Error in auth callback script:', e);
-                                if (window.opener) {{
-                                    window.opener.postMessage({{
-                                        type: 'GOOGLE_AUTH_ERROR',
-                                        error: String(e)
-                                    }}, '*');
+                                // 嘗試發送錯誤訊息（不檢查 opener.closed）
+                                try {{
+                                    if (window.opener) {{
+                                        window.opener.postMessage({{
+                                            type: 'GOOGLE_AUTH_ERROR',
+                                            error: String(e)
+                                        }}, '*');
+                                    }}
+                                }} catch (postErr) {{
+                                    console.warn('DEBUG: Failed to send error message:', postErr);
                                 }}
                             }}
                         }})();
