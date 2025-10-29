@@ -333,6 +333,72 @@ def init_database():
         )
     """)
     
+    # 創建長期記憶對話表（Long Term Memory）
+    execute_sql("""
+        CREATE TABLE IF NOT EXISTS long_term_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            conversation_type TEXT NOT NULL,
+            session_id TEXT,
+            message_role TEXT NOT NULL,
+            message_content TEXT NOT NULL,
+            metadata TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES user_auth (user_id)
+        )
+    """)
+    
+    # 創建AI顧問對話記錄表
+    execute_sql("""
+        CREATE TABLE IF NOT EXISTS ai_advisor_chats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            message_role TEXT NOT NULL,
+            message_content TEXT NOT NULL,
+            platform TEXT,
+            topic TEXT,
+            style TEXT,
+            duration TEXT,
+            metadata TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES user_auth (user_id)
+        )
+    """)
+    
+    # 創建IP人設規劃對話記錄表
+    execute_sql("""
+        CREATE TABLE IF NOT EXISTS ip_planning_chats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            message_role TEXT NOT NULL,
+            message_content TEXT NOT NULL,
+            positioning_type TEXT,
+            target_audience TEXT,
+            content_style TEXT,
+            metadata TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES user_auth (user_id)
+        )
+    """)
+    
+    # 創建LLM對話記錄表
+    execute_sql("""
+        CREATE TABLE IF NOT EXISTS llm_conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            message_role TEXT NOT NULL,
+            message_content TEXT NOT NULL,
+            conversation_context TEXT,
+            model_used TEXT,
+            metadata TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES user_auth (user_id)
+        )
+    """)
+    
     # 創建授權記錄表（licenses）
     execute_sql("""
         CREATE TABLE IF NOT EXISTS licenses (
@@ -1730,6 +1796,397 @@ def create_app() -> FastAPI:
             
             conn.close()
             return {"scripts": scripts}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    # 長期記憶相關API
+    @app.post("/api/memory/long-term")
+    async def save_long_term_memory(
+        conversation_type: str,
+        session_id: str,
+        message_role: str,
+        message_content: str,
+        metadata: Optional[str] = None,
+        current_user_id: Optional[str] = Depends(get_current_user)
+    ):
+        """儲存長期記憶對話"""
+        if not current_user_id:
+            return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("""
+                    INSERT INTO long_term_memory (user_id, conversation_type, session_id, message_role, message_content, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (current_user_id, conversation_type, session_id, message_role, message_content, metadata))
+            else:
+                cursor.execute("""
+                    INSERT INTO long_term_memory (user_id, conversation_type, session_id, message_role, message_content, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (current_user_id, conversation_type, session_id, message_role, message_content, metadata))
+            
+            conn.close()
+            return {"success": True, "message": "長期記憶已儲存"}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.get("/api/memory/long-term")
+    async def get_long_term_memory(
+        conversation_type: Optional[str] = None,
+        session_id: Optional[str] = None,
+        limit: int = 50,
+        current_user_id: Optional[str] = Depends(get_current_user)
+    ):
+        """獲取長期記憶對話"""
+        if not current_user_id:
+            return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                if conversation_type and session_id:
+                    cursor.execute("""
+                        SELECT id, conversation_type, session_id, message_role, message_content, metadata, created_at
+                        FROM long_term_memory
+                        WHERE user_id = %s AND conversation_type = %s AND session_id = %s
+                        ORDER BY created_at DESC
+                        LIMIT %s
+                    """, (current_user_id, conversation_type, session_id, limit))
+                elif conversation_type:
+                    cursor.execute("""
+                        SELECT id, conversation_type, session_id, message_role, message_content, metadata, created_at
+                        FROM long_term_memory
+                        WHERE user_id = %s AND conversation_type = %s
+                        ORDER BY created_at DESC
+                        LIMIT %s
+                    """, (current_user_id, conversation_type, limit))
+                else:
+                    cursor.execute("""
+                        SELECT id, conversation_type, session_id, message_role, message_content, metadata, created_at
+                        FROM long_term_memory
+                        WHERE user_id = %s
+                        ORDER BY created_at DESC
+                        LIMIT %s
+                    """, (current_user_id, limit))
+            else:
+                if conversation_type and session_id:
+                    cursor.execute("""
+                        SELECT id, conversation_type, session_id, message_role, message_content, metadata, created_at
+                        FROM long_term_memory
+                        WHERE user_id = ? AND conversation_type = ? AND session_id = ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    """, (current_user_id, conversation_type, session_id, limit))
+                elif conversation_type:
+                    cursor.execute("""
+                        SELECT id, conversation_type, session_id, message_role, message_content, metadata, created_at
+                        FROM long_term_memory
+                        WHERE user_id = ? AND conversation_type = ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    """, (current_user_id, conversation_type, limit))
+                else:
+                    cursor.execute("""
+                        SELECT id, conversation_type, session_id, message_role, message_content, metadata, created_at
+                        FROM long_term_memory
+                        WHERE user_id = ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    """, (current_user_id, limit))
+            
+            memories = []
+            for row in cursor.fetchall():
+                memories.append({
+                    "id": row[0],
+                    "conversation_type": row[1],
+                    "session_id": row[2],
+                    "message_role": row[3],
+                    "message_content": row[4],
+                    "metadata": row[5],
+                    "created_at": row[6]
+                })
+            
+            conn.close()
+            return {"memories": memories}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    # 管理員長期記憶API
+    @app.get("/api/admin/long-term-memory")
+    async def get_all_long_term_memory(conversation_type: Optional[str] = None, limit: int = 100):
+        """獲取所有長期記憶記錄（管理員用）"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                if conversation_type:
+                    cursor.execute("""
+                        SELECT ltm.id, ltm.user_id, ltm.conversation_type, ltm.session_id, 
+                               ltm.message_role, ltm.message_content, ltm.metadata, ltm.created_at,
+                               ua.name, ua.email
+                        FROM long_term_memory ltm
+                        LEFT JOIN user_auth ua ON ltm.user_id = ua.user_id
+                        WHERE ltm.conversation_type = %s
+                        ORDER BY ltm.created_at DESC
+                        LIMIT %s
+                    """, (conversation_type, limit))
+                else:
+                    cursor.execute("""
+                        SELECT ltm.id, ltm.user_id, ltm.conversation_type, ltm.session_id, 
+                               ltm.message_role, ltm.message_content, ltm.metadata, ltm.created_at,
+                               ua.name, ua.email
+                        FROM long_term_memory ltm
+                        LEFT JOIN user_auth ua ON ltm.user_id = ua.user_id
+                        ORDER BY ltm.created_at DESC
+                        LIMIT %s
+                    """, (limit,))
+            else:
+                if conversation_type:
+                    cursor.execute("""
+                        SELECT ltm.id, ltm.user_id, ltm.conversation_type, ltm.session_id, 
+                               ltm.message_role, ltm.message_content, ltm.metadata, ltm.created_at,
+                               ua.name, ua.email
+                        FROM long_term_memory ltm
+                        LEFT JOIN user_auth ua ON ltm.user_id = ua.user_id
+                        WHERE ltm.conversation_type = ?
+                        ORDER BY ltm.created_at DESC
+                        LIMIT ?
+                    """, (conversation_type, limit))
+                else:
+                    cursor.execute("""
+                        SELECT ltm.id, ltm.user_id, ltm.conversation_type, ltm.session_id, 
+                               ltm.message_role, ltm.message_content, ltm.metadata, ltm.created_at,
+                               ua.name, ua.email
+                        FROM long_term_memory ltm
+                        LEFT JOIN user_auth ua ON ltm.user_id = ua.user_id
+                        ORDER BY ltm.created_at DESC
+                        LIMIT ?
+                    """, (limit,))
+            
+            memories = []
+            for row in cursor.fetchall():
+                memories.append({
+                    "id": row[0],
+                    "user_id": row[1],
+                    "conversation_type": row[2],
+                    "session_id": row[3],
+                    "message_role": row[4],
+                    "message_content": row[5],
+                    "metadata": row[6],
+                    "created_at": row[7],
+                    "user_name": row[8],
+                    "user_email": row[9]
+                })
+            
+            conn.close()
+            return {"memories": memories}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.get("/api/admin/memory-stats")
+    async def get_memory_stats():
+        """獲取長期記憶統計（管理員用）"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                # 總記憶數
+                cursor.execute("SELECT COUNT(*) FROM long_term_memory")
+                total_memories = cursor.fetchone()[0]
+                
+                # 活躍用戶數
+                cursor.execute("SELECT COUNT(DISTINCT user_id) FROM long_term_memory")
+                active_users = cursor.fetchone()[0]
+                
+                # 今日新增記憶數
+                cursor.execute("""
+                    SELECT COUNT(*) FROM long_term_memory 
+                    WHERE DATE(created_at) = CURRENT_DATE
+                """)
+                today_memories = cursor.fetchone()[0]
+                
+                # 平均記憶/用戶
+                avg_memories_per_user = total_memories / active_users if active_users > 0 else 0
+                
+            else:
+                # SQLite 版本
+                cursor.execute("SELECT COUNT(*) FROM long_term_memory")
+                total_memories = cursor.fetchone()[0]
+                
+                cursor.execute("SELECT COUNT(DISTINCT user_id) FROM long_term_memory")
+                active_users = cursor.fetchone()[0]
+                
+                cursor.execute("""
+                    SELECT COUNT(*) FROM long_term_memory 
+                    WHERE DATE(created_at) = DATE('now')
+                """)
+                today_memories = cursor.fetchone()[0]
+                
+                avg_memories_per_user = total_memories / active_users if active_users > 0 else 0
+            
+            conn.close()
+            return {
+                "total_memories": total_memories,
+                "active_users": active_users,
+                "today_memories": today_memories,
+                "avg_memories_per_user": round(avg_memories_per_user, 2)
+            }
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    # 獲取用戶的長期記憶（支援會話篩選）
+    @app.get("/api/memory/long-term")
+    async def get_user_long_term_memory(
+        conversation_type: Optional[str] = None,
+        session_id: Optional[str] = None,
+        limit: int = 50,
+        current_user_id: Optional[str] = Depends(get_current_user)
+    ):
+        """獲取用戶的長期記憶記錄"""
+        if not current_user_id:
+            return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 構建查詢條件
+            where_conditions = ["user_id = ?" if not use_postgresql else "user_id = %s"]
+            params = [current_user_id]
+            
+            if conversation_type:
+                where_conditions.append("conversation_type = ?" if not use_postgresql else "conversation_type = %s")
+                params.append(conversation_type)
+            
+            if session_id:
+                where_conditions.append("session_id = ?" if not use_postgresql else "session_id = %s")
+                params.append(session_id)
+            
+            where_clause = " AND ".join(where_conditions)
+            
+            if use_postgresql:
+                cursor.execute(f"""
+                    SELECT id, user_id, conversation_type, session_id, 
+                           message_role, message_content, metadata, created_at
+                    FROM long_term_memory
+                    WHERE {where_clause}
+                    ORDER BY created_at ASC
+                    LIMIT %s
+                """, params + [limit])
+            else:
+                cursor.execute(f"""
+                    SELECT id, user_id, conversation_type, session_id, 
+                           message_role, message_content, metadata, created_at
+                    FROM long_term_memory
+                    WHERE {where_clause}
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                """, params + [limit])
+            
+            memories = []
+            for row in cursor.fetchall():
+                memories.append({
+                    "id": row[0],
+                    "user_id": row[1],
+                    "conversation_type": row[2],
+                    "session_id": row[3],
+                    "message_role": row[4],
+                    "message_content": row[5],
+                    "metadata": row[6],
+                    "created_at": row[7]
+                })
+            
+            conn.close()
+            return {"memories": memories}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    # 獲取用戶的會話列表
+    @app.get("/api/memory/sessions")
+    async def get_user_sessions(
+        conversation_type: Optional[str] = None,
+        limit: int = 20,
+        current_user_id: Optional[str] = Depends(get_current_user)
+    ):
+        """獲取用戶的會話列表"""
+        if not current_user_id:
+            return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            where_condition = "user_id = ?" if not use_postgresql else "user_id = %s"
+            params = [current_user_id]
+            
+            if conversation_type:
+                where_condition += " AND conversation_type = ?" if not use_postgresql else " AND conversation_type = %s"
+                params.append(conversation_type)
+            
+            if use_postgresql:
+                cursor.execute(f"""
+                    SELECT session_id, 
+                           MAX(created_at) as last_time,
+                           COUNT(*) as message_count,
+                           MAX(CASE WHEN message_role = 'user' THEN message_content END) as last_user_message,
+                           MAX(CASE WHEN message_role = 'assistant' THEN message_content END) as last_ai_message
+                    FROM long_term_memory
+                    WHERE {where_condition}
+                    GROUP BY session_id
+                    ORDER BY last_time DESC
+                    LIMIT %s
+                """, params + [limit])
+            else:
+                cursor.execute(f"""
+                    SELECT session_id, 
+                           MAX(created_at) as last_time,
+                           COUNT(*) as message_count,
+                           MAX(CASE WHEN message_role = 'user' THEN message_content END) as last_user_message,
+                           MAX(CASE WHEN message_role = 'assistant' THEN message_content END) as last_ai_message
+                    FROM long_term_memory
+                    WHERE {where_condition}
+                    GROUP BY session_id
+                    ORDER BY last_time DESC
+                    LIMIT ?
+                """, params + [limit])
+            
+            sessions = []
+            for row in cursor.fetchall():
+                sessions.append({
+                    "session_id": row[0],
+                    "last_time": row[1],
+                    "message_count": row[2],
+                    "last_user_message": row[3],
+                    "last_ai_message": row[4]
+                })
+            
+            conn.close()
+            return {"sessions": sessions}
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
     
