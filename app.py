@@ -511,11 +511,14 @@ def verify_access_token(token: str, allow_expired: bool = False) -> Optional[str
         import json
         parts = token.split('.')
         if len(parts) != 3:
+            print(f"DEBUG: verify_access_token - token 格式錯誤（不是3部分），allow_expired={allow_expired}")
             return None
         
         # 驗證簽名
-        signature = hashlib.sha256(f"{parts[0]}.{parts[1]}.{JWT_SECRET}".encode()).hexdigest()
-        if signature != parts[2]:
+        expected_signature = hashlib.sha256(f"{parts[0]}.{parts[1]}.{JWT_SECRET}".encode()).hexdigest()
+        if expected_signature != parts[2]:
+            print(f"DEBUG: verify_access_token - 簽名驗證失敗，allow_expired={allow_expired}")
+            print(f"DEBUG: JWT_SECRET 是否設定: {JWT_SECRET is not None and JWT_SECRET != ''}")
             return None
         
         # 解碼 payload
@@ -523,11 +526,21 @@ def verify_access_token(token: str, allow_expired: bool = False) -> Optional[str
         
         # 檢查過期時間（如果 allow_expired=False）
         if not allow_expired:
-            if payload.get("exp", 0) < datetime.now().timestamp():
+            exp = payload.get("exp", 0)
+            now = datetime.now().timestamp()
+            if exp < now:
+                print(f"DEBUG: verify_access_token - token 已過期，exp={exp}, now={now}, allow_expired={allow_expired}")
                 return None
         
-        return payload.get("user_id")
-    except:
+        user_id = payload.get("user_id")
+        if allow_expired:
+            exp = payload.get("exp", 0)
+            now = datetime.now().timestamp()
+            is_expired = exp < now
+            print(f"DEBUG: verify_access_token - 驗證成功，user_id={user_id}, 已過期={is_expired}, allow_expired={allow_expired}")
+        return user_id
+    except Exception as e:
+        print(f"DEBUG: verify_access_token - 發生異常: {str(e)}, allow_expired={allow_expired}")
         return None
 
 
@@ -562,8 +575,15 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 async def get_current_user_for_refresh(credentials: HTTPAuthorizationCredentials = Depends(security)) -> Optional[str]:
     """獲取當前用戶 ID（允許過期的 token，用於 refresh 場景）"""
     if not credentials:
+        print("DEBUG: get_current_user_for_refresh - 沒有 credentials")
         return None
-    return verify_access_token(credentials.credentials, allow_expired=True)
+    token = credentials.credentials
+    user_id = verify_access_token(token, allow_expired=True)
+    if not user_id:
+        print(f"DEBUG: get_current_user_for_refresh - token 驗證失敗，token 前10個字符: {token[:10] if token else 'None'}")
+    else:
+        print(f"DEBUG: get_current_user_for_refresh - 成功驗證，user_id: {user_id}")
+    return user_id
 
 
 def resolve_kb_path() -> Optional[str]:
@@ -3788,8 +3808,11 @@ def create_app() -> FastAPI:
         current_user_id: Optional[str] = Depends(get_current_user_for_refresh)
     ):
         """刷新存取權杖（允許使用過期的 token）"""
+        print(f"DEBUG: refresh_token - current_user_id={current_user_id}")
         if not current_user_id:
+            print("DEBUG: refresh_token - current_user_id 為 None，返回 401")
             raise HTTPException(status_code=401, detail="未授權")
+        print(f"DEBUG: refresh_token - 開始處理 refresh，user_id={current_user_id}")
         
         try:
             # 獲取資料庫連接
