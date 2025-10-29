@@ -3595,126 +3595,29 @@ def create_app() -> FastAPI:
                 # 生成應用程式訪問令牌
                 app_access_token = generate_access_token(user_id)
                 
-                # 處理字串以安全地嵌入 JavaScript（先處理再放入 f-string，避免 f-string 中不能有反斜線）
-                safe_email = (google_user.email or '').replace("'", "\\'").replace('"', '\\"').replace('\n', '\\n')
-                safe_name = (google_user.name or '').replace("'", "\\'").replace('"', '\\"').replace('\n', '\\n')
-                safe_picture = (google_user.picture or '').replace("'", "\\'").replace('"', '\\"').replace('\n', '\\n')
-                safe_user_id = (user_id or '').replace("'", "\\'").replace('"', '\\"')
-                safe_token = (app_access_token or '').replace("'", "\\'").replace('"', '\\"')
+                # 使用 URL 編碼確保參數安全
+                from urllib.parse import quote
+                safe_token = quote(app_access_token)
+                safe_user_id = quote(user_id)
+                safe_email = quote(google_user.email or '')
+                safe_name = quote(google_user.name or '')
+                safe_picture = quote(google_user.picture or '')
                 
-                # 返回一個 HTML 頁面，使用 postMessage 傳遞認證結果給父視窗
-                html_content = f"""
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <title>登入成功</title>
-                    <style>
-                        body {{
-                            font-family: Arial, sans-serif;
-                            display: flex;
-                            align-items: center;
-                            justify-content: center;
-                            height: 100vh;
-                            margin: 0;
-                            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                        }}
-                        .container {{
-                            text-align: center;
-                            background: white;
-                            padding: 40px;
-                            border-radius: 12px;
-                            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
-                        }}
-                        h2 {{ color: #27ae60; margin: 0 0 10px 0; }}
-                        p {{ color: #7f8c8d; margin: 0; }}
-                    </style>
-                </head>
-                <body>
-                    <div class="container">
-                        <h2>✅ 登入成功！</h2>
-                        <p>視窗即將自動關閉...</p>
-                    </div>
-                    <script>
-                        (function() {{
-                            console.log('DEBUG: Auth callback script executing');
-                            console.log('DEBUG: window.opener exists:', !!window.opener);
-                            
-                            try {{
-                                // 準備訊息對象
-                                var message = {{
-                                    type: 'GOOGLE_AUTH_SUCCESS',
-                                    accessToken: '{safe_token}',
-                                    user: {{
-                                        id: '{safe_user_id}',
-                                        user_id: '{safe_user_id}',
-                                        email: '{safe_email}',
-                                        name: '{safe_name}',
-                                        picture: '{safe_picture}'
-                                    }}
-                                }};
-                                console.log('DEBUG: Message to send:', message);
-                                
-                                // 嘗試發送 postMessage（不檢查 opener.closed，避免 COOP 錯誤）
-                                if (window.opener) {{
-                                    console.log('DEBUG: window.opener exists, sending postMessage');
-                                    // 嘗試多次發送，確保訊息被接收
-                                    try {{
-                                        window.opener.postMessage(message, '*');
-                                        setTimeout(function() {{
-                                            try {{
-                                                window.opener.postMessage(message, '*');
-                                            }} catch (e2) {{
-                                                console.log('DEBUG: Second postMessage attempt failed:', e2);
-                                            }}
-                                        }}, 100);
-                                        setTimeout(function() {{
-                                            try {{
-                                                window.opener.postMessage(message, '*');
-                                            }} catch (e3) {{
-                                                console.log('DEBUG: Third postMessage attempt failed:', e3);
-                                            }}
-                                        }}, 500);
-                                    }} catch (postErr) {{
-                                        console.warn('DEBUG: postMessage failed, will redirect:', postErr);
-                                        // postMessage 失敗，使用重定向作為 fallback
-                                        window.location.href = 'https://aivideonew.zeabur.app/?token={safe_token}&user_id={safe_user_id}&email={safe_email}&name={safe_name}&picture={safe_picture}';
-                                    }}
-                                    
-                                    // 延遲關閉視窗，確保訊息已發送
-                                    setTimeout(function() {{
-                                        try {{
-                                            window.close();
-                                        }} catch (e) {{
-                                            console.log('DEBUG: Unable to close window:', e);
-                                        }}
-                                    }}, 1500);
-                                }} else {{
-                                    console.log('DEBUG: No window.opener, redirecting directly');
-                                    // 如果不是 popup，導向前端首頁並附帶 token
-                                    window.location.href = 'https://aivideonew.zeabur.app/?token={safe_token}&user_id={safe_user_id}&email={safe_email}&name={safe_name}&picture={safe_picture}';
-                                }}
-                            }} catch (e) {{
-                                console.error('Error in auth callback script:', e);
-                                // 嘗試發送錯誤訊息（不檢查 opener.closed）
-                                try {{
-                                    if (window.opener) {{
-                                        window.opener.postMessage({{
-                                            type: 'GOOGLE_AUTH_ERROR',
-                                            error: String(e)
-                                        }}, '*');
-                                    }}
-                                }} catch (postErr) {{
-                                    console.warn('DEBUG: Failed to send error message:', postErr);
-                                }}
-                            }}
-                        }})();
-                    </script>
-                </body>
-                </html>
-                """
+                # Redirect 到前端的 popup-callback.html 頁面
+                # 該頁面會使用 postMessage 傳遞 token 給主視窗並自動關閉
+                callback_url = (
+                    f"https://aivideonew.zeabur.app/auth/popup-callback.html"
+                    f"?token={safe_token}"
+                    f"&user_id={safe_user_id}"
+                    f"&email={safe_email}"
+                    f"&name={safe_name}"
+                    f"&picture={safe_picture}"
+                )
+                
+                print(f"DEBUG: Redirecting to callback URL: {callback_url}")
                 
                 # 設置適當的 HTTP Header 以支援 popup 通信
-                response = HTMLResponse(content=html_content)
+                response = RedirectResponse(url=callback_url)
                 response.headers["Cross-Origin-Opener-Policy"] = "same-origin-allow-popups"
                 response.headers["Access-Control-Allow-Origin"] = "https://aivideonew.zeabur.app"
                 return response
