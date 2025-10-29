@@ -3659,74 +3659,74 @@ def create_app() -> FastAPI:
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/auth/refresh")
-async def refresh_token(
-    current_user_id: Optional[str] = Depends(get_current_user)
-):
-    """刷新存取權杖"""
-    if not current_user_id:
-        raise HTTPException(status_code=401, detail="未授權")
-    
-    try:
-        # 從資料庫獲取用戶的 refresh token
-        cursor.execute("""
-            SELECT refresh_token, expires_at FROM user_auth 
-            WHERE user_id = ?
-        """, (current_user_id,))
+    @app.post("/api/auth/refresh")
+    async def refresh_token(
+        current_user_id: Optional[str] = Depends(get_current_user)
+    ):
+        """刷新存取權杖"""
+        if not current_user_id:
+            raise HTTPException(status_code=401, detail="未授權")
         
-        result = cursor.fetchone()
-        if not result:
-            raise HTTPException(status_code=404, detail="用戶不存在")
-        
-        refresh_token, expires_at = result
-        
-        if not refresh_token:
-            raise HTTPException(status_code=401, detail="沒有 refresh token")
-        
-        # 檢查 refresh token 是否過期
-        if expires_at and datetime.now() > datetime.fromisoformat(expires_at.replace('Z', '+00:00')):
-            raise HTTPException(status_code=401, detail="Refresh token 已過期")
-        
-        # 使用 Google API 刷新 token
         try:
-            from google.auth.transport import requests
-            from google.oauth2.credentials import Credentials
-            
-            credentials = Credentials(
-                token=None,
-                refresh_token=refresh_token,
-                token_uri="https://oauth2.googleapis.com/token",
-                client_id=os.getenv("GOOGLE_CLIENT_ID"),
-                client_secret=os.getenv("GOOGLE_CLIENT_SECRET")
-            )
-            
-            # 刷新 token
-            request = requests.Request()
-            credentials.refresh(request)
-            
-            # 更新資料庫中的 token
-            new_expires_at = datetime.now() + timedelta(hours=1)
+            # 從資料庫獲取用戶的 refresh token
             cursor.execute("""
-                UPDATE user_auth 
-                SET access_token = ?, expires_at = ?
+                SELECT refresh_token, expires_at FROM user_auth 
                 WHERE user_id = ?
-            """, (credentials.token, new_expires_at.isoformat(), current_user_id))
-            conn.commit()
+            """, (current_user_id,))
             
-            return {
-                "access_token": credentials.token,
-                "expires_at": new_expires_at.isoformat()
-            }
+            result = cursor.fetchone()
+            if not result:
+                raise HTTPException(status_code=404, detail="用戶不存在")
             
+            refresh_token, expires_at = result
+            
+            if not refresh_token:
+                raise HTTPException(status_code=401, detail="沒有 refresh token")
+            
+            # 檢查 refresh token 是否過期
+            if expires_at and datetime.now() > datetime.fromisoformat(expires_at.replace('Z', '+00:00')):
+                raise HTTPException(status_code=401, detail="Refresh token 已過期")
+            
+            # 使用 Google API 刷新 token
+            try:
+                from google.auth.transport import requests
+                from google.oauth2.credentials import Credentials
+                
+                credentials = Credentials(
+                    token=None,
+                    refresh_token=refresh_token,
+                    token_uri="https://oauth2.googleapis.com/token",
+                    client_id=os.getenv("GOOGLE_CLIENT_ID"),
+                    client_secret=os.getenv("GOOGLE_CLIENT_SECRET")
+                )
+                
+                # 刷新 token
+                request = requests.Request()
+                credentials.refresh(request)
+                
+                # 更新資料庫中的 token
+                new_expires_at = datetime.now() + timedelta(hours=1)
+                cursor.execute("""
+                    UPDATE user_auth 
+                    SET access_token = ?, expires_at = ?
+                    WHERE user_id = ?
+                """, (credentials.token, new_expires_at.isoformat(), current_user_id))
+                conn.commit()
+                
+                return {
+                    "access_token": credentials.token,
+                    "expires_at": new_expires_at.isoformat()
+                }
+                
+            except Exception as e:
+                print(f"刷新 token 失敗: {e}")
+                raise HTTPException(status_code=401, detail="無法刷新 token")
+                
         except Exception as e:
-            print(f"刷新 token 失敗: {e}")
-            raise HTTPException(status_code=401, detail="無法刷新 token")
-            
-    except Exception as e:
-        print(f"刷新 token 錯誤: {e}")
-        raise HTTPException(status_code=500, detail="內部伺服器錯誤")
+            print(f"刷新 token 錯誤: {e}")
+            raise HTTPException(status_code=500, detail="內部伺服器錯誤")
 
-@app.get("/api/auth/me")
+    @app.get("/api/auth/me")
 async def get_current_user_info(current_user_id: Optional[str] = Depends(get_current_user)):
     """獲取當前用戶資訊"""
     if not current_user_id:
