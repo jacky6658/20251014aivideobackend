@@ -3727,7 +3727,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail="內部伺服器錯誤")
 
     @app.get("/api/auth/me")
-async def get_current_user_info(current_user_id: Optional[str] = Depends(get_current_user)):
+    async def get_current_user_info(current_user_id: Optional[str] = Depends(get_current_user)):
     """獲取當前用戶資訊"""
     if not current_user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
