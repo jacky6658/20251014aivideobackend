@@ -3842,6 +3842,57 @@ def create_app() -> FastAPI:
             print(f"刷新 token 錯誤: {e}")
             raise HTTPException(status_code=500, detail="內部伺服器錯誤")
 
+    # 兼容路徑：/api/auth/token/refresh（與上面相同行為）
+    @app.post("/api/auth/token/refresh")
+    async def refresh_token_compat(request: Request):
+        try:
+            body = {}
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            user_id = (body or {}).get("user_id")
+            if not user_id:
+                auth_hdr = request.headers.get("Authorization", "")
+                if auth_hdr.startswith("Bearer "):
+                    token = auth_hdr.split(" ", 1)[1]
+                    user_id = verify_access_token(token) or None
+            if not user_id:
+                raise HTTPException(status_code=401, detail="未授權")
+
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            if use_postgresql:
+                cursor.execute("SELECT user_id FROM user_auth WHERE user_id = %s", (user_id,))
+            else:
+                cursor.execute("SELECT user_id FROM user_auth WHERE user_id = ?", (user_id,))
+            if not cursor.fetchone():
+                conn.close()
+                raise HTTPException(status_code=404, detail="用戶不存在")
+
+            new_access_token = generate_access_token(user_id)
+            new_expires_at = datetime.now().timestamp() + 3600
+            if use_postgresql:
+                cursor.execute(
+                    "UPDATE user_auth SET access_token = %s, expires_at = %s, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s",
+                    (new_access_token, datetime.now(), user_id)
+                )
+            else:
+                cursor.execute(
+                    "UPDATE user_auth SET access_token = ?, expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                    (new_access_token, new_expires_at, user_id)
+                )
+                conn.commit()
+            conn.close()
+            return {"access_token": new_access_token, "expires_in": 3600}
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"刷新 token 兼容路徑錯誤: {e}")
+            raise HTTPException(status_code=500, detail="內部伺服器錯誤")
+
     @app.get("/api/auth/me")
     async def get_current_user_info(current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取當前用戶資訊"""
