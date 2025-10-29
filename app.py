@@ -499,8 +499,13 @@ def generate_access_token(user_id: str) -> str:
     return f"{encoded_header}.{encoded_payload}.{signature}"
 
 
-def verify_access_token(token: str) -> Optional[str]:
-    """驗證訪問令牌並返回用戶 ID"""
+def verify_access_token(token: str, allow_expired: bool = False) -> Optional[str]:
+    """驗證訪問令牌並返回用戶 ID
+    
+    Args:
+        token: JWT token
+        allow_expired: 如果為 True，允許過期的 token（用於 refresh 場景）
+    """
     try:
         import base64
         import json
@@ -516,9 +521,10 @@ def verify_access_token(token: str) -> Optional[str]:
         # 解碼 payload
         payload = json.loads(base64.urlsafe_b64decode(parts[1] + '==').decode())
         
-        # 檢查過期時間
-        if payload.get("exp", 0) < datetime.now().timestamp():
-            return None
+        # 檢查過期時間（如果 allow_expired=False）
+        if not allow_expired:
+            if payload.get("exp", 0) < datetime.now().timestamp():
+                return None
         
         return payload.get("user_id")
     except:
@@ -552,6 +558,12 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     if not credentials:
         return None
     return verify_access_token(credentials.credentials)
+
+async def get_current_user_for_refresh(credentials: HTTPAuthorizationCredentials = Depends(security)) -> Optional[str]:
+    """獲取當前用戶 ID（允許過期的 token，用於 refresh 場景）"""
+    if not credentials:
+        return None
+    return verify_access_token(credentials.credentials, allow_expired=True)
 
 
 def resolve_kb_path() -> Optional[str]:
@@ -3773,9 +3785,9 @@ def create_app() -> FastAPI:
 
     @app.post("/api/auth/refresh")
     async def refresh_token(
-        current_user_id: Optional[str] = Depends(get_current_user)
+        current_user_id: Optional[str] = Depends(get_current_user_for_refresh)
     ):
-        """刷新存取權杖"""
+        """刷新存取權杖（允許使用過期的 token）"""
         if not current_user_id:
             raise HTTPException(status_code=401, detail="未授權")
         
