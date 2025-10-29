@@ -3628,29 +3628,50 @@ def create_app() -> FastAPI:
                         <p>視窗即將自動關閉...</p>
                     </div>
                     <script>
-                        // 將認證結果傳遞給父視窗
-                        if (window.opener) {{
-                            window.opener.postMessage({{
-                                type: 'GOOGLE_AUTH_SUCCESS',
-                                accessToken: '{app_access_token}',
-                                user: {{
-                                    id: '{user_id}',
-                                    email: '{google_user.email}',
-                                    name: '{google_user.name}',
-                                    picture: '{google_user.picture}'
+                        (function() {{
+                            try {{
+                                if (window.opener) {{
+                                    window.opener.postMessage({{
+                                        type: 'GOOGLE_AUTH_SUCCESS',
+                                        accessToken: '{app_access_token}',
+                                        user: {{
+                                            id: '{user_id}',
+                                            email: '{google_user.email.replace("'", "\\'")}',
+                                            name: '{google_user.name.replace("'", "\\'")}',
+                                            picture: '{google_user.picture or ""}'
+                                        }}
+                                    }}, '*');
+                                    setTimeout(() => {{
+                                        try {{
+                                            window.close();
+                                        }} catch (e) {{
+                                            console.log('Unable to close window:', e);
+                                        }}
+                                    }}, 1000);
+                                }} else {{
+                                    // 如果不是 popup，導向前端首頁並附帶 token
+                                    window.location.href = 'https://aivideonew.zeabur.app/?token={app_access_token}&user_id={user_id}&email={google_user.email}&name={google_user.name}&picture={google_user.picture or ""}';
                                 }}
-                            }}, '*');
-                            setTimeout(() => window.close(), 1000);
-                        }} else {{
-                            // 如果不是 popup，導向前端首頁並附帶 token
-                            window.location.href = 'https://aivideonew.zeabur.app/?token={app_access_token}&user_id={user_id}&email={google_user.email}&name={google_user.name}&picture={google_user.picture}';
-                        }}
+                            }} catch (e) {{
+                                console.error('Error in auth callback script:', e);
+                                if (window.opener) {{
+                                    window.opener.postMessage({{
+                                        type: 'GOOGLE_AUTH_ERROR',
+                                        error: String(e)
+                                    }}, '*');
+                                }}
+                            }}
+                        }})();
                     </script>
                 </body>
                 </html>
                 """
                 
-                return HTMLResponse(content=html_content)
+                # 設置適當的 HTTP Header 以支援 popup 通信
+                response = HTMLResponse(content=html_content)
+                response.headers["Cross-Origin-Opener-Policy"] = "same-origin-allow-popups"
+                response.headers["Access-Control-Allow-Origin"] = "https://aivideonew.zeabur.app"
+                return response
                 
         except Exception as e:
             # 返回錯誤頁面
@@ -3686,19 +3707,35 @@ def create_app() -> FastAPI:
                     <p>{str(e)}</p>
                 </div>
                 <script>
-                    if (window.opener) {{
-                        window.opener.postMessage({{
-                            type: 'GOOGLE_AUTH_ERROR',
-                            error: '{str(e)}'
-                        }}, '*');
-                        setTimeout(() => window.close(), 3000);
-                    }}
+                    (function() {{
+                        try {{
+                            if (window.opener) {{
+                                window.opener.postMessage({{
+                                    type: 'GOOGLE_AUTH_ERROR',
+                                    error: '{str(e).replace("'", "\\'")}'
+                                }}, '*');
+                                setTimeout(() => {{
+                                    try {{
+                                        window.close();
+                                    }} catch (closeErr) {{
+                                        console.log('Unable to close window:', closeErr);
+                                    }}
+                                }}, 3000);
+                            }}
+                        }} catch (postErr) {{
+                            console.error('Error sending error message:', postErr);
+                        }}
+                    }})();
                 </script>
             </body>
             </html>
             """
             
-            return HTMLResponse(content=error_html, status_code=500)
+            # 設置適當的 HTTP Header 以支援 popup 通信
+            error_response = HTMLResponse(content=error_html, status_code=500)
+            error_response.headers["Cross-Origin-Opener-Policy"] = "same-origin-allow-popups"
+            error_response.headers["Access-Control-Allow-Origin"] = "https://aivideonew.zeabur.app"
+            return error_response
 
     @app.post("/api/auth/google/callback")
     async def google_callback_post(request: dict):
