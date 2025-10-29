@@ -34,6 +34,9 @@
 - ✅ CORS 設定：加入前端自訂網域 `reelmind.aijob.com.tw` 和後台 `backmanage.zeabur.app`
 - ✅ `create_app()` 函數修正：確保返回 `app` 實例
 - ✅ PostgreSQL/SQLite SQL 語法差異修正：所有 API 端點都支援雙資料庫
+- ✅ **長期記憶系統**：新增 `long_term_memory`、`ai_advisor_chats`、`ip_planning_chats`、`llm_conversations` 資料表
+- ✅ **會話管理API**：新增 `/api/memory/long-term`、`/api/memory/sessions` 端點
+- ✅ **管理員長期記憶API**：新增 `/api/admin/long-term-memory`、`/api/admin/memory-stats` 端點
 
 ---
 （以下為原 README 內容）
@@ -357,6 +360,15 @@ docker run -p 8000:8000 -e GEMINI_API_KEY=your_key ai-video-backend
   "history": []
 }
 ```
+
+### 長期記憶系統
+- **POST** `/api/memory/long-term` - 儲存長期記憶
+- **GET** `/api/memory/long-term` - 獲取用戶長期記憶（支援會話篩選）
+- **GET** `/api/memory/sessions` - 獲取用戶會話列表
+
+### 管理員長期記憶 API
+- **GET** `/api/admin/long-term-memory` - 獲取所有長期記憶記錄（管理員用）
+- **GET** `/api/admin/memory-stats` - 獲取長期記憶統計數據
 
 ## 部署到 Zeabur
 
