@@ -3595,6 +3595,13 @@ def create_app() -> FastAPI:
                 # 生成應用程式訪問令牌
                 app_access_token = generate_access_token(user_id)
                 
+                # 處理字串以安全地嵌入 JavaScript（先處理再放入 f-string，避免 f-string 中不能有反斜線）
+                safe_email = (google_user.email or '').replace("'", "\\'").replace('"', '\\"').replace('\n', '\\n')
+                safe_name = (google_user.name or '').replace("'", "\\'").replace('"', '\\"').replace('\n', '\\n')
+                safe_picture = (google_user.picture or '').replace("'", "\\'").replace('"', '\\"').replace('\n', '\\n')
+                safe_user_id = (user_id or '').replace("'", "\\'").replace('"', '\\"')
+                safe_token = (app_access_token or '').replace("'", "\\'").replace('"', '\\"')
+                
                 # 返回一個 HTML 頁面，使用 postMessage 傳遞認證結果給父視窗
                 html_content = f"""
                 <!DOCTYPE html>
@@ -3633,15 +3640,15 @@ def create_app() -> FastAPI:
                                 if (window.opener) {{
                                     window.opener.postMessage({{
                                         type: 'GOOGLE_AUTH_SUCCESS',
-                                        accessToken: '{app_access_token}',
+                                        accessToken: '{safe_token}',
                                         user: {{
-                                            id: '{user_id}',
-                                            email: '{google_user.email.replace("'", "\\'")}',
-                                            name: '{google_user.name.replace("'", "\\'")}',
-                                            picture: '{google_user.picture or ""}'
+                                            id: '{safe_user_id}',
+                                            email: '{safe_email}',
+                                            name: '{safe_name}',
+                                            picture: '{safe_picture}'
                                         }}
                                     }}, '*');
-                                    setTimeout(() => {{
+                                    setTimeout(function() {{
                                         try {{
                                             window.close();
                                         }} catch (e) {{
@@ -3650,7 +3657,7 @@ def create_app() -> FastAPI:
                                     }}, 1000);
                                 }} else {{
                                     // 如果不是 popup，導向前端首頁並附帶 token
-                                    window.location.href = 'https://aivideonew.zeabur.app/?token={app_access_token}&user_id={user_id}&email={google_user.email}&name={google_user.name}&picture={google_user.picture or ""}';
+                                    window.location.href = 'https://aivideonew.zeabur.app/?token={safe_token}&user_id={safe_user_id}&email={safe_email}&name={safe_name}&picture={safe_picture}';
                                 }}
                             }} catch (e) {{
                                 console.error('Error in auth callback script:', e);
@@ -3674,6 +3681,9 @@ def create_app() -> FastAPI:
                 return response
                 
         except Exception as e:
+            # 處理錯誤訊息以安全地嵌入 JavaScript（先處理再放入 f-string）
+            error_msg = str(e).replace("'", "\\'").replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
+            
             # 返回錯誤頁面
             error_html = f"""
             <!DOCTYPE html>
@@ -3704,7 +3714,7 @@ def create_app() -> FastAPI:
             <body>
                 <div class="container">
                     <h2>❌ 登入失敗</h2>
-                    <p>{str(e)}</p>
+                    <p>{error_msg}</p>
                 </div>
                 <script>
                     (function() {{
@@ -3712,9 +3722,9 @@ def create_app() -> FastAPI:
                             if (window.opener) {{
                                 window.opener.postMessage({{
                                     type: 'GOOGLE_AUTH_ERROR',
-                                    error: '{str(e).replace("'", "\\'")}'
+                                    error: '{error_msg}'
                                 }}, '*');
-                                setTimeout(() => {{
+                                setTimeout(function() {{
                                     try {{
                                         window.close();
                                     }} catch (closeErr) {{
