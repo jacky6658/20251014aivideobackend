@@ -3772,68 +3772,72 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/auth/refresh")
-    async def refresh_token(
-        current_user_id: Optional[str] = Depends(get_current_user)
-    ):
-        """刷新存取權杖"""
-        if not current_user_id:
-            raise HTTPException(status_code=401, detail="未授權")
-        
+    async def refresh_token(request: Request):
+        """刷新存取權杖（不依賴現有 Authorization）
+        請求體可傳入 {"user_id": "..."}；若未提供，嘗試從 Authorization 解析。
+        生成新的應用 access_token（非 Google token），有效期 1 小時。
+        """
         try:
-            # 從資料庫獲取用戶的 refresh token
-            cursor.execute("""
-                SELECT refresh_token, expires_at FROM user_auth 
-                WHERE user_id = ?
-            """, (current_user_id,))
-            
-            result = cursor.fetchone()
-            if not result:
-                raise HTTPException(status_code=404, detail="用戶不存在")
-            
-            refresh_token, expires_at = result
-            
-            if not refresh_token:
-                raise HTTPException(status_code=401, detail="沒有 refresh token")
-            
-            # 檢查 refresh token 是否過期
-            if expires_at and datetime.now() > datetime.fromisoformat(expires_at.replace('Z', '+00:00')):
-                raise HTTPException(status_code=401, detail="Refresh token 已過期")
-            
-            # 使用 Google API 刷新 token
+            body = {}
             try:
-                from google.auth.transport import requests
-                from google.oauth2.credentials import Credentials
-                
-                credentials = Credentials(
-                    token=None,
-                    refresh_token=refresh_token,
-                    token_uri="https://oauth2.googleapis.com/token",
-                    client_id=os.getenv("GOOGLE_CLIENT_ID"),
-                    client_secret=os.getenv("GOOGLE_CLIENT_SECRET")
+                body = await request.json()
+            except Exception:
+                body = {}
+
+            user_id = (body or {}).get("user_id")
+
+            # 若未傳 user_id，嘗試從 Authorization 解出（即便過期也可能解不出）
+            if not user_id:
+                auth_hdr = request.headers.get("Authorization", "")
+                if auth_hdr.startswith("Bearer "):
+                    token = auth_hdr.split(" ", 1)[1]
+                    # 嘗試驗證（過期會失敗），忽略失敗繼續
+                    user_id = verify_access_token(token) or None
+
+            if not user_id:
+                raise HTTPException(status_code=401, detail="未授權")
+
+            # 確認用戶存在
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+
+            if use_postgresql:
+                cursor.execute("SELECT user_id FROM user_auth WHERE user_id = %s", (user_id,))
+            else:
+                cursor.execute("SELECT user_id FROM user_auth WHERE user_id = ?", (user_id,))
+            if not cursor.fetchone():
+                conn.close()
+                raise HTTPException(status_code=404, detail="用戶不存在")
+
+            # 生成新的應用 access token
+            new_access_token = generate_access_token(user_id)
+            new_expires_at = datetime.now().timestamp() + 3600
+
+            # 寫入 expires_at（以維持欄位一致），不依賴外部 OAuth
+            if use_postgresql:
+                cursor.execute(
+                    """
+                    UPDATE user_auth SET access_token = %s, expires_at = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = %s
+                    """,
+                    (new_access_token, datetime.now(), user_id)
                 )
-                
-                # 刷新 token
-                request = requests.Request()
-                credentials.refresh(request)
-                
-                # 更新資料庫中的 token
-                new_expires_at = datetime.now() + timedelta(hours=1)
-                cursor.execute("""
-                    UPDATE user_auth 
-                    SET access_token = ?, expires_at = ?
+            else:
+                cursor.execute(
+                    """
+                    UPDATE user_auth SET access_token = ?, expires_at = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE user_id = ?
-                """, (credentials.token, new_expires_at.isoformat(), current_user_id))
+                    """,
+                    (new_access_token, new_expires_at, user_id)
+                )
                 conn.commit()
-                
-                return {
-                    "access_token": credentials.token,
-                    "expires_at": new_expires_at.isoformat()
-                }
-                
-            except Exception as e:
-                print(f"刷新 token 失敗: {e}")
-                raise HTTPException(status_code=401, detail="無法刷新 token")
-                
+            conn.close()
+
+            return {"access_token": new_access_token, "expires_in": 3600}
+        except HTTPException:
+            raise
         except Exception as e:
             print(f"刷新 token 錯誤: {e}")
             raise HTTPException(status_code=500, detail="內部伺服器錯誤")
