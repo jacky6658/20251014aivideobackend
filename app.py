@@ -92,6 +92,14 @@ class AuthToken(BaseModel):
     user: GoogleUser
 
 
+class LongTermMemoryRequest(BaseModel):
+    conversation_type: str
+    session_id: str
+    message_role: str
+    message_content: str
+    metadata: Optional[str] = None
+
+
 # 載入環境變數
 load_dotenv()
 
@@ -1802,11 +1810,7 @@ def create_app() -> FastAPI:
     # 長期記憶相關API
     @app.post("/api/memory/long-term")
     async def save_long_term_memory(
-        conversation_type: str,
-        session_id: str,
-        message_role: str,
-        message_content: str,
-        metadata: Optional[str] = None,
+        request_body: LongTermMemoryRequest,
         current_user_id: Optional[str] = Depends(get_current_user)
     ):
         """儲存長期記憶對話"""
@@ -1824,13 +1828,15 @@ def create_app() -> FastAPI:
                 cursor.execute("""
                     INSERT INTO long_term_memory (user_id, conversation_type, session_id, message_role, message_content, metadata)
                     VALUES (%s, %s, %s, %s, %s, %s)
-                """, (current_user_id, conversation_type, session_id, message_role, message_content, metadata))
+                """, (current_user_id, request_body.conversation_type, request_body.session_id, request_body.message_role, request_body.message_content, request_body.metadata))
             else:
                 cursor.execute("""
                     INSERT INTO long_term_memory (user_id, conversation_type, session_id, message_role, message_content, metadata)
                     VALUES (?, ?, ?, ?, ?, ?)
-                """, (current_user_id, conversation_type, session_id, message_role, message_content, metadata))
+                """, (current_user_id, request_body.conversation_type, request_body.session_id, request_body.message_role, request_body.message_content, request_body.metadata))
             
+            if not use_postgresql:
+                conn.commit()
             conn.close()
             return {"success": True, "message": "長期記憶已儲存"}
         except Exception as e:
