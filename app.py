@@ -3298,7 +3298,6 @@ def create_app() -> FastAPI:
                     else:
                         # SQLite 返回 'YYYY-MM-DD' 字符串
                         from datetime import datetime
-from datetime import timedelta
                         date_str = str(row[0])
                         day_obj = datetime.strptime(date_str, '%Y-%m-%d')
                         day_name = day_obj.strftime('%a')
