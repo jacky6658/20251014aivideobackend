@@ -544,6 +544,24 @@ A: 檢查：
 
 ---
 
+## 🧾 金流串接代辦（Backend TODO）
+
+1. 金流供應商選擇與沙箱開通：ECPay / NewebPay / TapPay（擇一）。
+2. 設計回調安全：
+   - 加入簽章驗證（HMAC/檢核碼），比對交易參數與金額。
+   - 白名單限制來源 IP/網域。
+   - 防止重放：transaction_id 去重（唯一索引）。
+3. 訂單流程：
+   - 建立 `orders`（pending）→ 付款完成（paid）→ 更新 `licenses` 與 `user_auth.is_subscribed=1`。
+   - 年/月方案：計算 `expires_at`（30 天或 365 天）。
+4. API 介面：
+   - `POST /api/payment/checkout`：建立訂單並取得第三方 CheckOut URL。
+   - `POST /api/payment/webhook`：第三方伺服器端通知（必需驗簽）。
+   - `GET /api/payment/return`：使用者瀏覽器返回頁（顯示結果）。
+   - 目前暫用 `/api/payment/callback` 做為測試端點，後續替換為 webhook/return 雙軌。
+5. 設定檔與環境變數：`PAYMENT_MERCHANT_ID`、`PAYMENT_HASH_KEY`、`PAYMENT_HASH_IV`、`PAYMENT_RETURN_URL`、`PAYMENT_NOTIFY_URL`。
+6. 日誌與對帳：串接交易流水，建立每日對帳批次（CSV 匯出或 API 拉取）。
+
 ### 2025-10-28 - 上架前完整功能更新
 
 #### 🚀 新增功能

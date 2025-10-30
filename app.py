@@ -530,7 +530,7 @@ def verify_access_token(token: str, allow_expired: bool = False) -> Optional[str
             now = datetime.now().timestamp()
             if exp < now:
                 print(f"DEBUG: verify_access_token - token 已過期，exp={exp}, now={now}, allow_expired={allow_expired}")
-                return None
+            return None
         
         user_id = payload.get("user_id")
         if allow_expired:
@@ -3298,6 +3298,7 @@ def create_app() -> FastAPI:
                     else:
                         # SQLite 返回 'YYYY-MM-DD' 字符串
                         from datetime import datetime
+from datetime import timedelta
                         date_str = str(row[0])
                         day_obj = datetime.strptime(date_str, '%Y-%m-%d')
                         day_name = day_obj.strftime('%a')
@@ -3569,7 +3570,7 @@ def create_app() -> FastAPI:
                         google_user.picture,
                         access_token,
                         expires_at_value,
-                        1  # 新用戶預設為已訂閱
+                            0  # 新用戶預設為未訂閱
                     ))
                 else:
                     # SQLite 語法
@@ -3585,7 +3586,7 @@ def create_app() -> FastAPI:
                         google_user.picture,
                         access_token,
                         datetime.now().timestamp() + token_data.get("expires_in", 3600),
-                        1  # 新用戶預設為已訂閱
+                            0  # 新用戶預設為未訂閱
                     ))
                 
                 if not use_postgresql:
@@ -3661,11 +3662,11 @@ def create_app() -> FastAPI:
                 <script>
                     (function() {{
                         try {{
-                            if (window.opener) {{
-                                window.opener.postMessage({{
-                                    type: 'GOOGLE_AUTH_ERROR',
+                    if (window.opener) {{
+                        window.opener.postMessage({{
+                            type: 'GOOGLE_AUTH_ERROR',
                                     error: '{error_msg}'
-                                }}, '*');
+                        }}, '*');
                                 setTimeout(function() {{
                                     try {{
                                         window.close();
@@ -3688,6 +3689,112 @@ def create_app() -> FastAPI:
             error_response.headers["Cross-Origin-Opener-Policy"] = "same-origin-allow-popups"
             error_response.headers["Access-Control-Allow-Origin"] = "https://aivideonew.zeabur.app"
             return error_response
+
+    # ===== 金流回調（準備用，未啟用驗簽） =====
+    @app.post("/api/payment/callback")
+    async def payment_callback(payload: dict):
+        """金流回調（測試/準備用）：更新用戶訂閱狀態與到期日。
+        期待參數：
+        - user_id: str
+        - plan: 'monthly' | 'yearly'
+        - transaction_id, amount, paid_at（可選，用於記錄）
+        注意：正式上線需加入簽章驗證與來源白名單。
+        """
+        try:
+            user_id = payload.get("user_id")
+            plan = payload.get("plan")
+            paid_at = payload.get("paid_at")
+            transaction_id = payload.get("transaction_id")
+            amount = payload.get("amount")
+
+            if not user_id or plan not in ("monthly", "yearly"):
+                raise HTTPException(status_code=400, detail="missing user_id or invalid plan")
+
+            # 計算到期日
+            days = 30 if plan == "monthly" else 365
+            expires_dt = datetime.now() + timedelta(days=days)
+
+            conn = get_db_connection()
+            cursor = conn.cursor()
+
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+
+            # 更新/建立 licenses 記錄，並設為 active
+            if use_postgresql:
+                try:
+                    cursor.execute(
+                        """
+                        INSERT INTO licenses (user_id, tier, seats, expires_at, status, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        ON CONFLICT (user_id)
+                        DO UPDATE SET
+                            tier = EXCLUDED.tier,
+                            expires_at = EXCLUDED.expires_at,
+                            status = EXCLUDED.status,
+                            updated_at = CURRENT_TIMESTAMP
+                        """,
+                        (user_id, plan, 1, expires_dt, "active")
+                    )
+                except Exception as e:
+                    # 若 licenses 不存在，忽略而不阻擋主流程
+                    print("WARN: update licenses failed:", e)
+            else:
+                try:
+                    cursor.execute(
+                        """
+                        INSERT OR REPLACE INTO licenses
+                        (user_id, tier, seats, expires_at, status, updated_at)
+                        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        """,
+                        (user_id, plan, 1, expires_dt.timestamp(), "active")
+                    )
+                except Exception as e:
+                    print("WARN: update licenses failed:", e)
+
+            # 將 user 設為已訂閱
+            if use_postgresql:
+                cursor.execute(
+                    "UPDATE user_auth SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s",
+                    (user_id,)
+                )
+            else:
+                cursor.execute(
+                    "UPDATE user_auth SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                    (user_id,)
+                )
+
+            # 可選：記錄訂單（若有 orders 表）
+            try:
+                if use_postgresql:
+                    cursor.execute(
+                        """
+                        INSERT INTO orders (user_id, plan_type, amount, payment_status, paid_at, invoice_number, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        """,
+                        (user_id, plan, amount, "paid", paid_at, transaction_id)
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO orders (user_id, plan_type, amount, payment_status, paid_at, invoice_number, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        """,
+                        (user_id, plan, amount, "paid", paid_at, transaction_id)
+                    )
+            except Exception as e:
+                print("WARN: insert orders failed:", e)
+
+            if not use_postgresql:
+                conn.commit()
+            conn.close()
+
+            return {"ok": True, "user_id": user_id, "plan": plan, "expires_at": expires_dt.isoformat()}
+        except HTTPException:
+            raise
+        except Exception as e:
+            print("payment_callback error:", e)
+            raise HTTPException(status_code=500, detail="payment callback failed")
 
     @app.post("/api/auth/google/callback")
     async def google_callback_post(request: dict):
