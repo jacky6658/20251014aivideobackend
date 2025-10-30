@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse, HTMLResponse
+from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse, HTMLResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -1055,6 +1055,8 @@ def create_app() -> FastAPI:
     # CORS for local file or dev servers
     frontend_url = os.getenv("FRONTEND_URL")
     cors_origins = [
+        "http://localhost:5173",   # 本地前端
+        "http://127.0.0.1:5173",  # 本地前端（備用）
         "http://localhost:8080",
         "http://127.0.0.1:8080",
         "https://aivideonew.zeabur.app",
