@@ -242,10 +242,28 @@ AI 短影音智能體後端服務，提供短影音腳本生成和文案創作�
 
 ## 環境變數設定
 ```bash
+# AI 模型設定
 GEMINI_API_KEY=your_gemini_api_key
 GEMINI_MODEL=gemini-2.5-flash
 KB_PATH=/app/data/kb.txt
+
+# OAuth 認證設定
+GOOGLE_CLIENT_ID=your_google_client_id
+GOOGLE_CLIENT_SECRET=your_google_client_secret
+OAUTH_REDIRECT_URI=https://aivideobackend.zeabur.app/api/auth/google/callback
+
+# JWT 設定（必須是固定值）
+JWT_SECRET=u5c1N4kQm8Zf2Tg7Pp9Lr3Xw6Yd0Aq2H
+
+# 資料庫設定（可選）
+DATABASE_URL=postgresql://user:password@host:port/dbname  # 如果有 PostgreSQL
+DATABASE_PATH=/persistent  # SQLite 持久化路徑（Zeabur 使用）
 ```
+
+**重要注意事項**：
+- `JWT_SECRET` 必須是固定值，建議使用提供的值或在 Zeabur 環境變數中設定
+- 如果 `JWT_SECRET` 改變，所有現有的 access token 都會失效
+- `OAUTH_REDIRECT_URI` 必須與 Google Cloud Console 中設定的 redirect URI 完全一致
 
 ## 本地開發
 
@@ -415,6 +433,116 @@ A: 檢查：
 3. 後端服務是否正常運行
 
 ## 更新日誌
+
+### 2025-10-29 - OAuth 登入流程全面優化
+
+#### 🚀 新增功能
+- **改進 OAuth Callback 處理**：後端 redirect 到前端專用的 `popup-callback.html` 頁面
+- **URL 參數傳遞**：通過 URL 參數安全地傳遞 token 和用戶資訊
+- **COOP 標頭設置**：添加 `Cross-Origin-Opener-Policy: same-origin-allow-popups` 支援彈窗通信
+- **Token Refresh 改進**：允許過期 token 用於 refresh，改進錯誤處理
+
+#### 🛠️ 技術修改
+**檔案：app.py**
+
+**1. OAuth Callback 改進**：
+- 移除內嵌 HTML 頁面的複雜 postMessage 邏輯
+- 改為簡單的 redirect 到 `https://aivideonew.zeabur.app/auth/popup-callback.html`
+- 使用 URL 參數傳遞 token、user_id、email、name、picture
+- 使用 `urllib.parse.quote()` 確保參數安全編碼
+- 添加 COOP 和 CORS 標頭支援跨域通信
+
+**2. Token Refresh 改進**：
+- 新增 `get_current_user_for_refresh()` 函數：允許接受過期但有效簽名的 token
+- 修改 `verify_access_token()` 函數：添加 `allow_expired` 參數
+- 改進 `/api/auth/refresh` 端點：使用新的 refresh 依賴項，添加詳細的 DEBUG 日誌
+- 移除 user_id 要求：改回使用 `Authorization` header（標準做法）
+
+**3. 錯誤處理改進**：
+- 改進 OAuth callback 錯誤頁面的 postMessage 發送
+- 移除 `window.opener.closed` 檢查，避免 COOP 錯誤
+- 添加更詳細的 DEBUG 日誌記錄
+
+#### 📊 API 端點更新
+
+**OAuth 端點**：
+- `GET /api/auth/google` - 生成 Google OAuth URL
+- `GET /api/auth/google/callback` - 處理 OAuth callback（**已改為 redirect 到前端**）
+
+**Token 管理端點**：
+- `POST /api/auth/refresh` - 刷新 access token（**支援過期 token**）
+- `GET /api/auth/me` - 獲取當前用戶資訊
+
+#### 🔧 關鍵問題修復
+1. **OAuth Callback 複雜性問題**：
+   - **問題**：內嵌 HTML 頁面的 postMessage 邏輯複雜且容易失敗
+   - **解決**：改為 redirect 到前端專用頁面，由前端統一處理
+
+2. **Token Refresh 失敗問題**：
+   - **問題**：過期 token 無法用於 refresh，導致 401 錯誤循環
+   - **解決**：允許過期但有效簽名的 token 用於 refresh
+
+3. **COOP 錯誤問題**：
+   - **問題**：檢查 `window.opener.closed` 觸發 COOP 錯誤
+   - **解決**：移除所有 `window.opener.closed` 檢查
+
+4. **URL 參數安全問題**：
+   - **問題**：用戶資料直接嵌入 URL 可能不安全
+   - **解決**：使用 `urllib.parse.quote()` 正確編碼所有參數
+
+#### 🎯 工作流程
+
+**登入流程**：
+```
+1. 用戶點擊登入
+   ↓
+2. 前端請求 /api/auth/google
+   ↓
+3. 後端返回 Google OAuth URL
+   ↓
+4. 用戶完成 Google 登入
+   ↓
+5. Google redirect 到 /api/auth/google/callback?code=...
+   ↓
+6. 後端交換 code 獲取 access_token
+   ↓
+7. 後端獲取用戶資訊並生成應用 access token
+   ↓
+8. 後端 redirect 到前端 popup-callback.html?token=...&user_id=...
+   ↓
+9. 前端 popup-callback.html 處理 token 並通知主視窗
+   ↓
+10. 主視窗更新登入狀態 ✅
+```
+
+#### 📝 環境變數配置
+
+**必要環境變數**：
+- `GOOGLE_CLIENT_ID` - Google OAuth Client ID
+- `GOOGLE_CLIENT_SECRET` - Google OAuth Client Secret
+- `OAUTH_REDIRECT_URI` - OAuth redirect URI（建議：`https://aivideobackend.zeabur.app/api/auth/google/callback`）
+- `JWT_SECRET` - JWT 簽名密鑰（**必須是固定值**，建議：`u5c1N4kQm8Zf2Tg7Pp9Lr3Xw6Yd0Aq2H`）
+
+**注意事項**：
+- `JWT_SECRET` 必須在 Zeabur 環境變數中設定為固定值
+- 如果 `JWT_SECRET` 改變，所有現有的 token 都會失效
+- Google OAuth `redirect_uri` 需要更新為前端的 `popup-callback.html`
+
+#### 🎯 測試結果
+所有功能已驗證正常：
+- ✅ **OAuth Callback**：正確 redirect 到前端頁面
+- ✅ **URL 參數編碼**：安全處理所有用戶資料
+- ✅ **Token Refresh**：支援過期 token 刷新
+- ✅ **COOP 標頭**：正確設置支援彈窗通信
+- ✅ **錯誤處理**：完整的錯誤訊息和日誌記錄
+
+#### 📝 經驗總結
+1. **簡化 Callback 邏輯**：將複雜的 postMessage 邏輯移到前端，後端只負責資料處理和 redirect
+2. **URL 參數安全**：使用正確的編碼確保特殊字符不會破壞 URL
+3. **Token 管理**：允許過期 token 用於 refresh 提供更好的用戶體驗
+4. **COOP 標頭**：正確設置 COOP 標頭支援現代瀏覽器的跨域通信安全政策
+
+---
 
 ### 2025-10-28 - 上架前完整功能更新
 
