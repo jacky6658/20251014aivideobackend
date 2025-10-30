@@ -107,12 +107,20 @@ load_dotenv()
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 GOOGLE_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI", "http://localhost:5173/auth/callback")
+FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "https://aivideonew.zeabur.app")
+# 允許作為回跳前端的白名單（避免任意導向）
+ALLOWED_FRONTENDS = {
+    "https://aivideonew.zeabur.app",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+}
 
 # 除錯資訊
 print(f"DEBUG: Environment variables loaded:")
 print(f"DEBUG: GOOGLE_CLIENT_ID: {GOOGLE_CLIENT_ID}")
 print(f"DEBUG: GOOGLE_CLIENT_SECRET: {GOOGLE_CLIENT_SECRET}")
 print(f"DEBUG: GOOGLE_REDIRECT_URI: {GOOGLE_REDIRECT_URI}")
+print(f"DEBUG: FRONTEND_BASE_URL: {FRONTEND_BASE_URL}")
 
 # JWT 密鑰（用於生成訪問令牌）
 JWT_SECRET = os.getenv("JWT_SECRET", secrets.token_urlsafe(32))
@@ -3476,8 +3484,13 @@ def create_app() -> FastAPI:
     # ===== OAuth 認證功能 =====
     
     @app.get("/api/auth/google")
-    async def google_auth():
+    async def google_auth(request: Request, fb: Optional[str] = None):
         """發起 Google OAuth 認證"""
+        # 透過查詢參數 fb 覆寫回跳前端（必須在白名單內）
+        chosen_frontend = fb if fb in ALLOWED_FRONTENDS else FRONTEND_BASE_URL
+        # 以 state 帶回前端 base，callback 取回以決定最終導向
+        from urllib.parse import quote
+        state_val = quote(chosen_frontend)
         auth_url = (
             f"https://accounts.google.com/o/oauth2/v2/auth?"
             f"client_id={GOOGLE_CLIENT_ID}&"
@@ -3485,7 +3498,8 @@ def create_app() -> FastAPI:
             f"response_type=code&"
             f"scope=openid email profile&"
             f"access_type=offline&"
-            f"prompt=select_account"
+            f"prompt=select_account&"
+            f"state={state_val}"
         )
         
         # 除錯資訊
@@ -3496,7 +3510,7 @@ def create_app() -> FastAPI:
         return {"auth_url": auth_url}
 
     @app.get("/api/auth/google/callback")
-    async def google_callback_get(code: str = None):
+    async def google_callback_get(code: str = None, state: Optional[str] = None):
         """處理 Google OAuth 回調（GET 請求 - 來自 Google 重定向）"""
         try:
             # 除錯資訊
@@ -3598,17 +3612,25 @@ def create_app() -> FastAPI:
                 app_access_token = generate_access_token(user_id)
                 
                 # 使用 URL 編碼確保參數安全
-                from urllib.parse import quote
+                from urllib.parse import quote, unquote
                 safe_token = quote(app_access_token)
                 safe_user_id = quote(user_id)
                 safe_email = quote(google_user.email or '')
                 safe_name = quote(google_user.name or '')
                 safe_picture = quote(google_user.picture or '')
-                
+                # 取回 state 中的前端 base（若在白名單內）
+                frontend_base = FRONTEND_BASE_URL
+                try:
+                    if state:
+                        decoded = unquote(state)
+                        if decoded in ALLOWED_FRONTENDS:
+                            frontend_base = decoded
+                except Exception:
+                    pass
                 # Redirect 到前端的 popup-callback.html 頁面
                 # 該頁面會使用 postMessage 傳遞 token 給主視窗並自動關閉
                 callback_url = (
-                    f"https://aivideonew.zeabur.app/auth/popup-callback.html"
+                    f"{frontend_base}/auth/popup-callback.html"
                     f"?token={safe_token}"
                     f"&user_id={safe_user_id}"
                     f"&email={safe_email}"
@@ -3621,7 +3643,6 @@ def create_app() -> FastAPI:
                 # 設置適當的 HTTP Header 以支援 popup 通信
                 response = RedirectResponse(url=callback_url)
                 response.headers["Cross-Origin-Opener-Policy"] = "same-origin-allow-popups"
-                response.headers["Access-Control-Allow-Origin"] = "https://aivideonew.zeabur.app"
                 return response
                 
         except Exception as e:
