@@ -594,6 +594,20 @@ async def get_current_user_for_refresh(credentials: HTTPAuthorizationCredentials
     return user_id
 
 
+async def get_admin_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> Optional[str]:
+    """驗證並返回管理員用戶 ID。
+    透過環境變數 ADMIN_USER_IDS（以逗號分隔的 user_id 列表）判斷是否為管理員。
+    """
+    user_id = await get_current_user(credentials)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="未授權")
+    admin_ids = os.getenv("ADMIN_USER_IDS", "").split(",")
+    admin_ids = [x.strip() for x in admin_ids if x.strip()]
+    if user_id not in admin_ids:
+        raise HTTPException(status_code=403, detail="無管理員權限")
+    return user_id
+
+
 def resolve_kb_path() -> Optional[str]:
     env_path = os.getenv("KB_PATH")
     if env_path and os.path.isfile(env_path):
@@ -1405,8 +1419,10 @@ def create_app() -> FastAPI:
     # ===== 長期記憶功能 API =====
     
     @app.get("/api/user/memory/{user_id}")
-    async def get_user_memory_api(user_id: str):
+    async def get_user_memory_api(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶的長期記憶資訊"""
+        if not current_user_id or current_user_id != user_id:
+            return JSONResponse({"error": "無權限訪問此用戶資料"}, status_code=403)
         try:
             memory = get_user_memory(user_id)
             return {"user_id": user_id, "memory": memory}
@@ -1414,8 +1430,10 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.get("/api/user/conversations/{user_id}")
-    async def get_user_conversations(user_id: str):
+    async def get_user_conversations(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶的對話記錄"""
+        if not current_user_id or current_user_id != user_id:
+            return JSONResponse({"error": "無權限訪問此用戶資料"}, status_code=403)
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -1469,8 +1487,10 @@ def create_app() -> FastAPI:
     # ===== 用戶歷史API端點 =====
     
     @app.get("/api/user/generations/{user_id}")
-    async def get_user_generations(user_id: str):
+    async def get_user_generations(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶的生成記錄"""
+        if not current_user_id or current_user_id != user_id:
+            return JSONResponse({"error": "無權限訪問此用戶資料"}, status_code=403)
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -1512,8 +1532,10 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
 
     @app.get("/api/user/preferences/{user_id}")
-    async def get_user_preferences(user_id: str):
+    async def get_user_preferences(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶的偏好設定"""
+        if not current_user_id or current_user_id != user_id:
+            return JSONResponse({"error": "無權限訪問此用戶資料"}, status_code=403)
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -1546,8 +1568,10 @@ def create_app() -> FastAPI:
     # ===== 短期記憶（STM）API =====
     
     @app.get("/api/user/stm/{user_id}")
-    async def get_user_stm(user_id: str):
+    async def get_user_stm(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶的短期記憶（當前會話記憶）"""
+        if not current_user_id or current_user_id != user_id:
+            return JSONResponse({"error": "無權限訪問此用戶資料"}, status_code=403)
         try:
             memory = stm.load_memory(user_id)
             return {
@@ -1563,8 +1587,10 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.delete("/api/user/stm/{user_id}")
-    async def clear_user_stm(user_id: str):
+    async def clear_user_stm(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """清除用戶的短期記憶"""
+        if not current_user_id or current_user_id != user_id:
+            return JSONResponse({"error": "無權限"}, status_code=403)
         try:
             stm.clear_memory(user_id)
             return {"message": "短期記憶已清除", "user_id": user_id}
@@ -1572,8 +1598,10 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.get("/api/user/memory/full/{user_id}")
-    async def get_full_memory(user_id: str):
+    async def get_full_memory(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶的完整記憶（STM + LTM）"""
+        if not current_user_id or current_user_id != user_id:
+            return JSONResponse({"error": "無權限訪問此用戶資料"}, status_code=403)
         try:
             # STM
             stm_data = stm.load_memory(user_id)
@@ -1603,12 +1631,14 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
 
     @app.post("/api/user/positioning/save")
-    async def save_positioning_record(request: Request):
+    async def save_positioning_record(request: Request, current_user_id: Optional[str] = Depends(get_current_user)):
         """儲存帳號定位記錄"""
         try:
             data = await request.json()
             user_id = data.get("user_id")
             content = data.get("content")
+            if not current_user_id or current_user_id != user_id:
+                return JSONResponse({"error": "無權限儲存至此用戶"}, status_code=403)
             
             if not user_id or not content:
                 return JSONResponse({"error": "缺少必要參數"}, status_code=400)
@@ -1715,7 +1745,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.delete("/api/user/positioning/{record_id}")
-    async def delete_positioning_record(record_id: int):
+    async def delete_positioning_record(record_id: int, current_user_id: Optional[str] = Depends(get_current_user)):
         """刪除帳號定位記錄"""
         try:
             conn = get_db_connection()
@@ -1723,6 +1753,19 @@ def create_app() -> FastAPI:
             
             database_url = os.getenv("DATABASE_URL")
             use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 檢查擁有者
+            if use_postgresql:
+                cursor.execute("SELECT user_id FROM positioning_records WHERE id = %s", (record_id,))
+            else:
+                cursor.execute("SELECT user_id FROM positioning_records WHERE id = ?", (record_id,))
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                return JSONResponse({"error": "記錄不存在"}, status_code=404)
+            if not current_user_id or row[0] != current_user_id:
+                conn.close()
+                return JSONResponse({"error": "無權限刪除此記錄"}, status_code=403)
             
             if use_postgresql:
                 cursor.execute("DELETE FROM positioning_records WHERE id = %s", (record_id,))
@@ -1740,7 +1783,7 @@ def create_app() -> FastAPI:
     # ===== 腳本儲存功能 API =====
     
     @app.post("/api/scripts/save")
-    async def save_script(request: Request):
+    async def save_script(request: Request, current_user_id: Optional[str] = Depends(get_current_user)):
         """儲存腳本"""
         max_retries = 3
         retry_count = 0
@@ -1757,6 +1800,8 @@ def create_app() -> FastAPI:
                 
                 if not user_id or not content:
                     return JSONResponse({"error": "缺少必要參數"}, status_code=400)
+                if not current_user_id or current_user_id != user_id:
+                    return JSONResponse({"error": "無權限儲存至此用戶"}, status_code=403)
                 
                 conn = get_db_connection()
                 cursor = conn.cursor()
@@ -1992,7 +2037,7 @@ def create_app() -> FastAPI:
     
     # 管理員長期記憶API
     @app.get("/api/admin/long-term-memory")
-    async def get_all_long_term_memory(conversation_type: Optional[str] = None, limit: int = 100):
+    async def get_all_long_term_memory(conversation_type: Optional[str] = None, limit: int = 100, admin_user: str = Depends(get_admin_user)):
         """獲取所有長期記憶記錄（管理員用）"""
         try:
             conn = get_db_connection()
@@ -2068,7 +2113,7 @@ def create_app() -> FastAPI:
 
     # 取得單筆長期記憶（管理員用）
     @app.get("/api/admin/long-term-memory/{memory_id}")
-    async def get_long_term_memory_by_id(memory_id: int):
+    async def get_long_term_memory_by_id(memory_id: int, admin_user: str = Depends(get_admin_user)):
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -2123,7 +2168,7 @@ def create_app() -> FastAPI:
 
     # 刪除單筆長期記憶（管理員用）
     @app.delete("/api/admin/long-term-memory/{memory_id}")
-    async def delete_long_term_memory(memory_id: int):
+    async def delete_long_term_memory(memory_id: int, admin_user: str = Depends(get_admin_user)):
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -2153,7 +2198,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.get("/api/admin/memory-stats")
-    async def get_memory_stats():
+    async def get_memory_stats(admin_user: str = Depends(get_admin_user)):
         """獲取長期記憶統計（管理員用）"""
         try:
             conn = get_db_connection()
@@ -2439,8 +2484,10 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
 
     @app.get("/api/user/behaviors/{user_id}")
-    async def get_user_behaviors(user_id: str):
+    async def get_user_behaviors(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶的行為統計"""
+        if not current_user_id or current_user_id != user_id:
+            return JSONResponse({"error": "無權限訪問此用戶資料"}, status_code=403)
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -2485,7 +2532,7 @@ def create_app() -> FastAPI:
     # ===== 管理員 API（用於後台管理系統） =====
     
     @app.get("/api/admin/users")
-    async def get_all_users():
+    async def get_all_users(admin_user: str = Depends(get_admin_user)):
         """獲取所有用戶資料（管理員用）"""
         try:
             conn = get_db_connection()
@@ -2583,7 +2630,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.put("/api/admin/users/{user_id}/subscription")
-    async def update_user_subscription(user_id: str, request: Request):
+    async def update_user_subscription(user_id: str, request: Request, admin_user: str = Depends(get_admin_user)):
         """更新用戶訂閱狀態（管理員用）"""
         try:
             data = await request.json()
@@ -2623,7 +2670,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.get("/api/admin/user/{user_id}/data")
-    async def get_user_complete_data(user_id: str):
+    async def get_user_complete_data(user_id: str, admin_user: str = Depends(get_admin_user)):
         """獲取指定用戶的完整資料（管理員用）"""
         try:
             conn = get_db_connection()
@@ -2829,7 +2876,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.get("/api/admin/statistics")
-    async def get_admin_statistics():
+    async def get_admin_statistics(admin_user: str = Depends(get_admin_user)):
         """獲取系統統計資料（管理員用）"""
         try:
             conn = get_db_connection()
@@ -2916,7 +2963,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.get("/api/admin/mode-statistics")
-    async def get_mode_statistics():
+    async def get_mode_statistics(admin_user: str = Depends(get_admin_user)):
         """獲取模式使用統計"""
         try:
             conn = get_db_connection()
@@ -3001,7 +3048,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.get("/api/admin/conversations")
-    async def get_all_conversations():
+    async def get_all_conversations(admin_user: str = Depends(get_admin_user)):
         """獲取所有對話記錄（管理員用）"""
         try:
             conn = get_db_connection()
@@ -3058,7 +3105,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.get("/api/admin/generations")
-    async def get_all_generations():
+    async def get_all_generations(admin_user: str = Depends(get_admin_user)):
         """獲取所有生成記錄"""
         try:
             conn = get_db_connection()
@@ -3107,7 +3154,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.get("/api/admin/scripts")
-    async def get_all_scripts():
+    async def get_all_scripts(admin_user: str = Depends(get_admin_user)):
         """獲取所有腳本記錄（管理員用）"""
         try:
             conn = get_db_connection()
@@ -3157,7 +3204,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.get("/api/admin/platform-statistics")
-    async def get_platform_statistics():
+    async def get_platform_statistics(admin_user: str = Depends(get_admin_user)):
         """獲取平台使用統計"""
         try:
             conn = get_db_connection()
@@ -3183,7 +3230,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.get("/api/admin/user-activities")
-    async def get_user_activities():
+    async def get_user_activities(admin_user: str = Depends(get_admin_user)):
         """獲取最近用戶活動"""
         try:
             conn = get_db_connection()
@@ -3260,7 +3307,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.get("/api/admin/analytics-data")
-    async def get_analytics_data():
+    async def get_analytics_data(admin_user: str = Depends(get_admin_user)):
         """獲取分析頁面所需的所有數據"""
         try:
             conn = get_db_connection()
@@ -3381,7 +3428,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.get("/api/admin/export/{export_type}")
-    async def export_csv(export_type: str):
+    async def export_csv(export_type: str, admin_user: str = Depends(get_admin_user)):
         """匯出 CSV 檔案"""
         import csv
         import io
@@ -4065,8 +4112,10 @@ def create_app() -> FastAPI:
     # ===== P0 功能：長期記憶＋個人化 =====
     
     @app.get("/api/profile/{user_id}")
-    async def get_user_profile(user_id: str):
+    async def get_user_profile(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶個人偏好"""
+        if not current_user_id or current_user_id != user_id:
+            return JSONResponse({"error": "無權限訪問此用戶資料"}, status_code=403)
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -4097,8 +4146,10 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/profile")
-    async def create_or_update_profile(profile: UserProfile):
+    async def create_or_update_profile(profile: UserProfile, current_user_id: Optional[str] = Depends(get_current_user)):
         """創建或更新用戶個人偏好"""
+        if not current_user_id or current_user_id != profile.user_id:
+            return JSONResponse({"error": "無權限變更此用戶資料"}, status_code=403)
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -4176,8 +4227,10 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/generations")
-    async def save_generation(generation: Generation):
+    async def save_generation(generation: Generation, current_user_id: Optional[str] = Depends(get_current_user)):
         """保存生成內容並檢查去重"""
+        if not current_user_id or current_user_id != generation.user_id:
+            return JSONResponse({"error": "無權限儲存至此用戶"}, status_code=403)
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -4250,8 +4303,10 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/generations/{user_id}")
-    async def get_user_generations(user_id: str, limit: int = 10):
+    async def get_user_generations(user_id: str, limit: int = 10, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶的生成歷史"""
+        if not current_user_id or current_user_id != user_id:
+            return JSONResponse({"error": "無權限訪問此用戶資料"}, status_code=403)
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -4293,8 +4348,10 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/conversation/summary")
-    async def create_conversation_summary(user_id: str, messages: List[ChatMessage]):
+    async def create_conversation_summary(user_id: str, messages: List[ChatMessage], current_user_id: Optional[str] = Depends(get_current_user)):
         """創建對話摘要"""
+        if not current_user_id or current_user_id != user_id:
+            return JSONResponse({"error": "無權限"}, status_code=403)
         try:
             if not os.getenv("GEMINI_API_KEY"):
                 return {"error": "Gemini API not configured"}
@@ -4354,8 +4411,10 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/conversation/summary/{user_id}")
-    async def get_conversation_summary(user_id: str):
+    async def get_conversation_summary(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶的對話摘要"""
+        if not current_user_id or current_user_id != user_id:
+            return JSONResponse({"error": "無權限訪問此用戶資料"}, status_code=403)
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -4488,7 +4547,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
 
     @app.get("/api/admin/orders")
-    async def get_all_orders():
+    async def get_all_orders(admin_user: str = Depends(get_admin_user)):
         """獲取所有訂單記錄（管理員用）"""
         try:
             conn = get_db_connection()
