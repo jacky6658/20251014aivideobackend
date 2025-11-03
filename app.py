@@ -111,6 +111,7 @@ FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "https://aivideonew.zeabur.ap
 # 允許作為回跳前端的白名單（避免任意導向）
 ALLOWED_FRONTENDS = {
     "https://aivideonew.zeabur.app",
+    "https://reelmind.aijob.com.tw",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 }
