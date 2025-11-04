@@ -2940,6 +2940,70 @@ def create_app() -> FastAPI:
                 """, (user_id,))
             user_behaviors = cursor.fetchall()
             
+            # 獲取訂單記錄
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT id, order_id, plan_type, amount, currency, payment_method, 
+                           payment_status, paid_at, expires_at, invoice_number, created_at
+                    FROM orders 
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                """, (user_id,))
+            else:
+                cursor.execute("""
+                    SELECT id, order_id, plan_type, amount, currency, payment_method, 
+                           payment_status, paid_at, expires_at, invoice_number, created_at
+                    FROM orders 
+                    WHERE user_id = ?
+                    ORDER BY created_at DESC
+                """, (user_id,))
+            
+            orders = []
+            for row in cursor.fetchall():
+                orders.append({
+                    "id": row[0],
+                    "order_id": row[1],
+                    "plan_type": row[2],
+                    "amount": row[3],
+                    "currency": row[4],
+                    "payment_method": row[5],
+                    "payment_status": row[6],
+                    "paid_at": str(row[7]) if row[7] else None,
+                    "expires_at": str(row[8]) if row[8] else None,
+                    "invoice_number": row[9],
+                    "created_at": str(row[10]) if row[10] else None
+                })
+            
+            # 獲取授權資訊
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT tier, seats, source, start_at, expires_at, status
+                    FROM licenses 
+                    WHERE user_id = %s AND status = 'active'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """, (user_id,))
+            else:
+                cursor.execute("""
+                    SELECT tier, seats, source, start_at, expires_at, status
+                    FROM licenses 
+                    WHERE user_id = ? AND status = 'active'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """, (user_id,))
+            
+            license_row = cursor.fetchone()
+            license = None
+            if license_row:
+                license = {
+                    "tier": license_row[0],
+                    "seats": license_row[1],
+                    "source": license_row[2],
+                    "start_at": str(license_row[3]) if license_row[3] else None,
+                    "expires_at": str(license_row[4]) if license_row[4] else None,
+                    "status": license_row[5]
+                }
+            
             conn.close()
             
             return {
@@ -2955,6 +3019,8 @@ def create_app() -> FastAPI:
                     "preferred_duration": user_data[7],
                     "content_preferences": json.loads(user_data[8]) if user_data[8] else None
                 },
+                "orders": orders,
+                "license": license,
                 "positioning_records": [
                     {
                         "id": record[0],
