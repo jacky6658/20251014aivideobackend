@@ -652,8 +652,15 @@ async def get_google_user_info(access_token: str) -> Optional[GoogleUser]:
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> Optional[str]:
     """獲取當前用戶 ID"""
     if not credentials:
+        print("DEBUG: get_current_user - 沒有 credentials")
         return None
-    return verify_access_token(credentials.credentials)
+    token = credentials.credentials
+    user_id = verify_access_token(token)
+    if not user_id:
+        print(f"DEBUG: get_current_user - token 驗證失敗，token 前20個字符: {token[:20] if token else 'None'}")
+    else:
+        print(f"DEBUG: get_current_user - 成功驗證，user_id: {user_id}")
+    return user_id
 
 async def get_current_user_for_refresh(credentials: HTTPAuthorizationCredentials = Depends(security)) -> Optional[str]:
     """獲取當前用戶 ID（允許過期的 token，用於 refresh 場景）"""
@@ -2095,7 +2102,14 @@ def create_app() -> FastAPI:
         current_user_id: Optional[str] = Depends(get_current_user)
     ):
         """儲存長期記憶對話"""
+        print(f"DEBUG: save_long_term_memory - 收到請求，current_user_id={current_user_id}")
+        print(f"DEBUG: request_body.conversation_type={request_body.conversation_type}")
+        print(f"DEBUG: request_body.session_id={request_body.session_id}")
+        print(f"DEBUG: request_body.message_role={request_body.message_role}")
+        print(f"DEBUG: request_body.message_content 長度={len(request_body.message_content) if request_body.message_content else 0}")
+        
         if not current_user_id:
+            print(f"ERROR: save_long_term_memory - current_user_id 為空，返回 401")
             return JSONResponse({"error": "請先登入"}, status_code=401)
         
         try:
@@ -2110,17 +2124,23 @@ def create_app() -> FastAPI:
                     INSERT INTO long_term_memory (user_id, conversation_type, session_id, message_role, message_content, metadata)
                     VALUES (%s, %s, %s, %s, %s, %s)
                 """, (current_user_id, request_body.conversation_type, request_body.session_id, request_body.message_role, request_body.message_content, request_body.metadata))
+                print(f"DEBUG: save_long_term_memory - PostgreSQL INSERT 成功，user_id={current_user_id}")
             else:
                 cursor.execute("""
                     INSERT INTO long_term_memory (user_id, conversation_type, session_id, message_role, message_content, metadata)
                     VALUES (?, ?, ?, ?, ?, ?)
                 """, (current_user_id, request_body.conversation_type, request_body.session_id, request_body.message_role, request_body.message_content, request_body.metadata))
+                print(f"DEBUG: save_long_term_memory - SQLite INSERT 成功，user_id={current_user_id}")
             
             if not use_postgresql:
                 conn.commit()
             conn.close()
+            print(f"SUCCESS: save_long_term_memory - 長期記憶已儲存，user_id={current_user_id}, conversation_type={request_body.conversation_type}")
             return {"success": True, "message": "長期記憶已儲存"}
         except Exception as e:
+            print(f"ERROR: save_long_term_memory - 發生異常: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.get("/api/memory/long-term")
