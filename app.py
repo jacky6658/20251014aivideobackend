@@ -942,6 +942,25 @@ def get_user_memory(user_id: Optional[str]) -> str:
             """, (user_id,))
         behaviors = cursor.fetchall()
 
+        # 獲取長期記憶（long_term_memory 表）- 新增
+        if use_postgresql:
+            cursor.execute("""
+                SELECT conversation_type, session_id, message_role, message_content, created_at
+                FROM long_term_memory
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+                LIMIT 50
+            """, (user_id,))
+        else:
+            cursor.execute("""
+                SELECT conversation_type, session_id, message_role, message_content, created_at
+                FROM long_term_memory
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+                LIMIT 50
+            """, (user_id,))
+        long_term_memories = cursor.fetchall()
+
         conn.close()
 
         # 構建增強記憶內容
@@ -991,6 +1010,41 @@ def get_user_memory(user_id: Optional[str]) -> str:
                     "general_consultation": "一般諮詢"
                 }.get(behavior_type, behavior_type)
                 memory_parts.append(f"- {type_name}：{count}次")
+
+        # 長期記憶對話內容（long_term_memory 表）- 新增
+        if long_term_memories:
+            memory_parts.append("長期記憶對話記錄：")
+            # 按會話分組
+            sessions = {}
+            for conv_type, session_id, role, content, created_at in long_term_memories:
+                if session_id not in sessions:
+                    sessions[session_id] = {
+                        "type": conv_type,
+                        "messages": []
+                    }
+                # 限制每條訊息長度，避免過長
+                content_preview = content[:200] + "..." if len(content) > 200 else content
+                sessions[session_id]["messages"].append({
+                    "role": role,
+                    "content": content_preview
+                })
+            
+            # 只顯示最近的幾個會話
+            session_count = 0
+            for session_id, session_data in list(sessions.items())[:5]:
+                session_count += 1
+                type_name = {
+                    "ai_advisor": "AI顧問對話",
+                    "ip_planning": "IP人設規劃",
+                    "llm_chat": "LLM對話",
+                    "script_generation": "腳本生成",
+                    "general": "一般對話"
+                }.get(session_data["type"], session_data["type"])
+                memory_parts.append(f"  {type_name}會話 {session_count}：")
+                # 只顯示最近的幾條訊息
+                for msg in session_data["messages"][:3]:
+                    role_name = "用戶" if msg["role"] == "user" else "AI"
+                    memory_parts.append(f"    [{role_name}] {msg['content']}")
 
         return "\n".join(memory_parts) if memory_parts else ""
 
@@ -3675,16 +3729,41 @@ def create_app() -> FastAPI:
                             frontend_base = decoded
                 except Exception:
                     pass
-                # Redirect 到前端的 popup-callback.html 頁面
-                # 該頁面會使用 postMessage 傳遞 token 給主視窗並自動關閉
-                callback_url = (
-                    f"{frontend_base}/auth/popup-callback.html"
-                    f"?token={safe_token}"
-                    f"&user_id={safe_user_id}"
-                    f"&email={safe_email}"
-                    f"&name={safe_name}"
-                    f"&picture={safe_picture}"
-                )
+                # 檢查 redirect_uri 是否為後台管理系統
+                is_admin_system = False
+                try:
+                    if redirect_uri:
+                        decoded_redirect = unquote(redirect_uri)
+                        # 檢查是否包含 admin_login 參數或後台管理系統路徑
+                        if 'admin_login=true' in decoded_redirect or '/admin' in decoded_redirect or 'manage-system' in decoded_redirect:
+                            is_admin_system = True
+                except Exception:
+                    pass
+                
+                # 如果是後台管理系統，直接 redirect 到 redirect_uri 並帶上 token
+                if is_admin_system and redirect_uri:
+                    decoded_redirect = unquote(redirect_uri)
+                    # 移除可能存在的參數，只保留基礎 URL
+                    redirect_base = decoded_redirect.split('?')[0]
+                    callback_url = (
+                        f"{redirect_base}"
+                        f"?token={safe_token}"
+                        f"&user_id={safe_user_id}"
+                        f"&email={safe_email}"
+                        f"&name={safe_name}"
+                        f"&picture={safe_picture}"
+                    )
+                else:
+                    # Redirect 到前端的 popup-callback.html 頁面
+                    # 該頁面會使用 postMessage 傳遞 token 給主視窗並自動關閉
+                    callback_url = (
+                        f"{frontend_base}/auth/popup-callback.html"
+                        f"?token={safe_token}"
+                        f"&user_id={safe_user_id}"
+                        f"&email={safe_email}"
+                        f"&name={safe_name}"
+                        f"&picture={safe_picture}"
+                    )
                 
                 print(f"DEBUG: Redirecting to callback URL: {callback_url}")
                 
