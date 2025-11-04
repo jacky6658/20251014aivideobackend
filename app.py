@@ -496,7 +496,7 @@ def generate_access_token(user_id: str) -> str:
     """生成訪問令牌"""
     payload = {
         "user_id": user_id,
-        "exp": datetime.now().timestamp() + 3600  # 1小時過期
+        "exp": datetime.now().timestamp() + 86400  # 24小時過期
     }
     # 簡單的 JWT 實現（生產環境建議使用 PyJWT）
     import base64
@@ -3962,7 +3962,7 @@ def create_app() -> FastAPI:
                 # 返回 JSON 格式（給前端 JavaScript 使用）
                 return AuthToken(
                     access_token=app_access_token,
-                    expires_in=3600,
+                    expires_in=86400,  # 24小時過期
                     user=google_user
                 )
                 
@@ -4001,7 +4001,7 @@ def create_app() -> FastAPI:
             
             # 生成新的 access token
             new_access_token = generate_access_token(current_user_id)
-            new_expires_at = datetime.now() + timedelta(hours=1)
+            new_expires_at = datetime.now() + timedelta(hours=24)
             
             # 更新資料庫中的 token
             if use_postgresql:
