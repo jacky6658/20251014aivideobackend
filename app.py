@@ -350,6 +350,43 @@ def init_database():
         )
     """)
     
+    # 創建管理員帳號表
+    execute_sql("""
+        CREATE TABLE IF NOT EXISTS admin_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            name TEXT,
+            is_active INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # 初始化管理員帳號（如果不存在）
+    try:
+        admin_email = "aiagentg888@gmail.com"
+        admin_password_hash = "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9"  # admin123 的 SHA256
+        if use_postgresql:
+            cursor.execute("""
+                INSERT INTO admin_accounts (email, password_hash, name, is_active)
+                VALUES (%s, %s, %s, 1)
+                ON CONFLICT (email) DO NOTHING
+            """, (admin_email, admin_password_hash, "管理員"))
+        else:
+            cursor.execute("""
+                INSERT OR IGNORE INTO admin_accounts (email, password_hash, name, is_active)
+                VALUES (?, ?, ?, 1)
+            """, (admin_email, admin_password_hash, "管理員"))
+        conn.commit()
+        print(f"INFO: 管理員帳號已初始化: {admin_email}")
+    except Exception as e:
+        print(f"INFO: 管理員帳號初始化時出現錯誤（可能是已存在）: {e}")
+        try:
+            conn.rollback()
+        except:
+            pass
+    
     # 創建長期記憶對話表（Long Term Memory）
     execute_sql("""
         CREATE TABLE IF NOT EXISTS long_term_memory (
@@ -597,16 +634,61 @@ async def get_current_user_for_refresh(credentials: HTTPAuthorizationCredentials
 
 async def get_admin_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> Optional[str]:
     """驗證並返回管理員用戶 ID。
-    透過環境變數 ADMIN_USER_IDS（以逗號分隔的 user_id 列表）判斷是否為管理員。
+    支援兩種方式判斷管理員：
+    1. 透過環境變數 ADMIN_USER_IDS（以逗號分隔的 user_id 列表）
+    2. 透過環境變數 ADMIN_EMAILS（以逗號分隔的 email 列表）
+    3. 透過資料庫 admin_accounts 表檢查
     """
     user_id = await get_current_user(credentials)
     if not user_id:
         raise HTTPException(status_code=401, detail="未授權")
+    
+    # 方式 1: 檢查 user_id 是否在白名單中
     admin_ids = os.getenv("ADMIN_USER_IDS", "").split(",")
     admin_ids = [x.strip() for x in admin_ids if x.strip()]
-    if user_id not in admin_ids:
-        raise HTTPException(status_code=403, detail="無管理員權限")
-    return user_id
+    if user_id in admin_ids:
+        return user_id
+    
+    # 方式 2: 檢查 email 是否在白名單中
+    admin_emails = os.getenv("ADMIN_EMAILS", "").split(",")
+    admin_emails = [x.strip().lower() for x in admin_emails if x.strip()]
+    
+    # 從資料庫獲取用戶 email
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        database_url = os.getenv("DATABASE_URL")
+        use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+        
+        if use_postgresql:
+            cursor.execute("SELECT email FROM user_auth WHERE user_id = %s", (user_id,))
+        else:
+            cursor.execute("SELECT email FROM user_auth WHERE user_id = ?", (user_id,))
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result and result[0]:
+            user_email = result[0].lower()
+            # 檢查 email 是否在白名單中
+            if user_email in admin_emails:
+                return user_id
+            
+            # 方式 3: 檢查是否在 admin_accounts 表中
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            if use_postgresql:
+                cursor.execute("SELECT id FROM admin_accounts WHERE email = %s AND is_active = 1", (user_email,))
+            else:
+                cursor.execute("SELECT id FROM admin_accounts WHERE email = ? AND is_active = 1", (user_email,))
+            admin_account = cursor.fetchone()
+            conn.close()
+            
+            if admin_account:
+                return user_id
+    except Exception as e:
+        print(f"檢查管理員權限時出錯: {e}")
+    
+    raise HTTPException(status_code=403, detail="無管理員權限")
 
 
 def resolve_kb_path() -> Optional[str]:
@@ -4624,6 +4706,93 @@ def create_app() -> FastAPI:
             else:
                 return {"user_id": user_id, "tier": "none", "expires_at": None}
         except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    @app.post("/api/admin/auth/login")
+    async def admin_login(request: Request):
+        """管理員帳號密碼登入"""
+        try:
+            body = await request.json()
+            email = body.get("email", "").strip().lower()
+            password = body.get("password", "").strip()
+            
+            if not email or not password:
+                return JSONResponse({"error": "請輸入帳號和密碼"}, status_code=400)
+            
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 檢查管理員帳號
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT id, email, password_hash, name, is_active 
+                    FROM admin_accounts 
+                    WHERE email = %s
+                """, (email,))
+            else:
+                cursor.execute("""
+                    SELECT id, email, password_hash, name, is_active 
+                    FROM admin_accounts 
+                    WHERE email = ?
+                """, (email,))
+            
+            admin_account = cursor.fetchone()
+            conn.close()
+            
+            if not admin_account:
+                return JSONResponse({"error": "帳號或密碼錯誤"}, status_code=401)
+            
+            account_id, account_email, password_hash, account_name, is_active = admin_account
+            
+            if not is_active:
+                return JSONResponse({"error": "帳號已停用"}, status_code=403)
+            
+            # 驗證密碼（使用 SHA256）
+            input_password_hash = hashlib.sha256(password.encode()).hexdigest()
+            if input_password_hash != password_hash:
+                return JSONResponse({"error": "帳號或密碼錯誤"}, status_code=401)
+            
+            # 生成 user_id（與 OAuth 登入一致）
+            user_id = generate_user_id(email)
+            
+            # 確保用戶資料存在於 user_auth 表中
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            if use_postgresql:
+                cursor.execute("""
+                    INSERT INTO user_auth (user_id, email, name, updated_at)
+                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (user_id) 
+                    DO UPDATE SET 
+                        email = EXCLUDED.email,
+                        name = EXCLUDED.name,
+                        updated_at = CURRENT_TIMESTAMP
+                """, (user_id, account_email, account_name or "管理員"))
+            else:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO user_auth (user_id, email, name, updated_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                """, (user_id, account_email, account_name or "管理員"))
+            
+            conn.commit()
+            conn.close()
+            
+            # 生成 access token
+            access_token = generate_access_token(user_id)
+            
+            return {
+                "access_token": access_token,
+                "token_type": "bearer",
+                "user_id": user_id,
+                "email": account_email,
+                "name": account_name or "管理員",
+                "expires_in": 86400  # 24小時
+            }
+        except Exception as e:
+            print(f"管理員登入錯誤: {e}")
             return JSONResponse({"error": str(e)}, status_code=500)
 
     @app.get("/api/admin/orders")
