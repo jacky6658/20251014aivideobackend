@@ -123,6 +123,10 @@ ALLOWED_FRONTENDS = {
     "https://reelmind.aijob.com.tw",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://localhost:8000",  # 本地測試（Python http.server）
+    "http://127.0.0.1:8000",  # 本地測試（Python http.server）
+    "http://localhost:8080",  # 其他常用本地端口
+    "http://127.0.0.1:8080",  # 其他常用本地端口
 }
 
 # 除錯資訊
@@ -2356,6 +2360,31 @@ def create_app() -> FastAPI:
             
             # 調試：記錄查詢結果數量
             print(f"DEBUG: long-term-memory/by-user 查詢返回 {len(rows)} 筆記錄")
+            print(f"DEBUG: 查詢的 SQL: {cursor.query if hasattr(cursor, 'query') else 'N/A'}")
+            
+            # 調試：先檢查 long_term_memory 表中有多少記錄
+            if use_postgresql:
+                cursor.execute("SELECT COUNT(*) FROM long_term_memory")
+            else:
+                cursor.execute("SELECT COUNT(*) FROM long_term_memory")
+            total_memories = cursor.fetchone()[0]
+            print(f"DEBUG: long_term_memory 表總共有 {total_memories} 筆記錄")
+            
+            # 調試：檢查有多少不同的 user_id
+            if use_postgresql:
+                cursor.execute("SELECT COUNT(DISTINCT user_id) FROM long_term_memory")
+            else:
+                cursor.execute("SELECT COUNT(DISTINCT user_id) FROM long_term_memory")
+            distinct_users = cursor.fetchone()[0]
+            print(f"DEBUG: long_term_memory 表中有 {distinct_users} 個不同的用戶")
+            
+            # 調試：列出所有 user_id
+            if use_postgresql:
+                cursor.execute("SELECT DISTINCT user_id FROM long_term_memory LIMIT 10")
+            else:
+                cursor.execute("SELECT DISTINCT user_id FROM long_term_memory LIMIT 10")
+            user_ids = cursor.fetchall()
+            print(f"DEBUG: 前10個 user_id: {[row[0] for row in user_ids]}")
             
             for row in rows:
                 users.append({
@@ -2374,6 +2403,8 @@ def create_app() -> FastAPI:
             
             # 調試：記錄返回的數據
             print(f"DEBUG: long-term-memory/by-user 返回 {len(users)} 個用戶")
+            for user in users:
+                print(f"DEBUG: 用戶 - ID: {user['user_id']}, 名稱: {user['user_name']}, Email: {user['user_email']}, 記憶數: {user['total_memories']}")
             
             return {"users": users}
         except Exception as e:
@@ -4088,16 +4119,30 @@ def create_app() -> FastAPI:
                         f"&picture={safe_picture}"
                     )
                 else:
-                    # Redirect 到前端的 popup-callback.html 頁面
-                    # 該頁面會使用 postMessage 傳遞 token 給主視窗並自動關閉
-                    callback_url = (
-                        f"{frontend_base}/auth/popup-callback.html"
-                        f"?token={safe_token}"
-                        f"&user_id={safe_user_id}"
-                        f"&email={safe_email}"
-                        f"&name={safe_name}"
-                        f"&picture={safe_picture}"
-                    )
+                    # 檢查是否為本地開發環境（localhost）
+                    # 如果是本地環境，直接重定向到主頁並帶上 token 參數
+                    # 如果是生產環境，使用 popup-callback.html（彈窗模式）
+                    if 'localhost' in frontend_base or '127.0.0.1' in frontend_base:
+                        # 本地開發：直接重定向到主頁
+                        callback_url = (
+                            f"{frontend_base}/"
+                            f"?token={safe_token}"
+                            f"&user_id={safe_user_id}"
+                            f"&email={safe_email}"
+                            f"&name={safe_name}"
+                            f"&picture={safe_picture}"
+                        )
+                    else:
+                        # 生產環境：Redirect 到前端的 popup-callback.html 頁面
+                        # 該頁面會使用 postMessage 傳遞 token 給主視窗並自動關閉
+                        callback_url = (
+                            f"{frontend_base}/auth/popup-callback.html"
+                            f"?token={safe_token}"
+                            f"&user_id={safe_user_id}"
+                            f"&email={safe_email}"
+                            f"&name={safe_name}"
+                            f"&picture={safe_picture}"
+                        )
                 
                 print(f"DEBUG: Redirecting to callback URL: {callback_url}")
                 
