@@ -4,6 +4,8 @@ import hashlib
 import sqlite3
 import secrets
 import asyncio
+import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Iterable
 from urllib.parse import urlparse
@@ -464,7 +466,7 @@ def init_database():
     execute_sql("""
         CREATE TABLE IF NOT EXISTS licenses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
+            user_id TEXT NOT NULL UNIQUE,
             order_id TEXT,
             tier TEXT DEFAULT 'personal',
             seats INTEGER DEFAULT 1,
@@ -477,6 +479,34 @@ def init_database():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    
+    # 為已存在的 licenses 表添加 UNIQUE 約束（如果不存在）
+    # 這對已存在的表進行遷移
+    if use_postgresql:
+        try:
+            # PostgreSQL: 檢查約束是否存在，不存在則添加
+            cursor.execute("""
+                SELECT constraint_name 
+                FROM information_schema.table_constraints 
+                WHERE table_name = 'licenses' 
+                AND constraint_type = 'UNIQUE' 
+                AND constraint_name LIKE '%user_id%'
+            """)
+            if not cursor.fetchone():
+                try:
+                    cursor.execute("ALTER TABLE licenses ADD CONSTRAINT licenses_user_id_unique UNIQUE (user_id)")
+                    print("INFO: 已為 licenses 表添加 user_id UNIQUE 約束")
+                except Exception as e:
+                    # 約束可能已存在或表不存在
+                    print(f"INFO: licenses.user_id UNIQUE 約束可能已存在或無法添加: {e}")
+        except Exception as e:
+            print(f"INFO: 檢查 licenses UNIQUE 約束時出錯（可忽略）: {e}")
+    else:
+        # SQLite: 創建唯一索引（如果不存在）
+        try:
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS licenses_user_id_unique ON licenses(user_id)")
+        except Exception as e:
+            print(f"INFO: licenses.user_id 唯一索引可能已存在: {e}")
     
     # PostgreSQL 使用 AUTOCOMMIT，不需要 commit
     # SQLite 需要 commit
@@ -4199,21 +4229,27 @@ def create_app() -> FastAPI:
 
             # 可選：記錄訂單（若有 orders 表）
             try:
+                # 生成 order_id（如果 transaction_id 為空）
+                order_id = transaction_id
+                if not order_id:
+                    # 生成唯一的 order_id：ORDER-{user_id前8位}-{timestamp}-{uuid前6位}
+                    order_id = f"ORDER-{user_id[:8]}-{int(time.time())}-{uuid.uuid4().hex[:6].upper()}"
+                
                 if use_postgresql:
                     cursor.execute(
                         """
-                        INSERT INTO orders (user_id, plan_type, amount, payment_status, paid_at, invoice_number, created_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        INSERT INTO orders (user_id, order_id, plan_type, amount, payment_status, paid_at, invoice_number, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                         """,
-                        (user_id, plan, amount, "paid", paid_at, transaction_id)
+                        (user_id, order_id, plan, amount, "paid", paid_at, transaction_id)
                     )
                 else:
                     cursor.execute(
                         """
-                        INSERT INTO orders (user_id, plan_type, amount, payment_status, paid_at, invoice_number, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        INSERT INTO orders (user_id, order_id, plan_type, amount, payment_status, paid_at, invoice_number, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                         """,
-                        (user_id, plan, amount, "paid", paid_at, transaction_id)
+                        (user_id, order_id, plan, amount, "paid", paid_at, transaction_id)
                     )
             except Exception as e:
                 print("WARN: insert orders failed:", e)
