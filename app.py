@@ -2341,6 +2341,126 @@ def create_app() -> FastAPI:
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
     
+    @app.get("/api/admin/long-term-memory/by-user")
+    async def get_long_term_memory_by_user(admin_user: str = Depends(get_admin_user)):
+        """按用戶分組獲取長期記憶統計（管理員用）"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT 
+                        ltm.user_id,
+                        COALESCE(ua.name, '未知') as name,
+                        COALESCE(ua.email, '未知') as email,
+                        COUNT(*) as total_memories,
+                        COUNT(DISTINCT ltm.conversation_type) as conversation_types,
+                        COUNT(DISTINCT ltm.session_id) as session_count,
+                        MIN(ltm.created_at) as first_memory,
+                        MAX(ltm.created_at) as last_memory,
+                        STRING_AGG(DISTINCT ltm.conversation_type, ', ') as types_list
+                    FROM long_term_memory ltm
+                    LEFT JOIN user_auth ua ON ltm.user_id = ua.user_id
+                    GROUP BY ltm.user_id, ua.name, ua.email
+                    ORDER BY total_memories DESC
+                """)
+            else:
+                cursor.execute("""
+                    SELECT 
+                        ltm.user_id,
+                        COALESCE(ua.name, '未知') as name,
+                        COALESCE(ua.email, '未知') as email,
+                        COUNT(*) as total_memories,
+                        COUNT(DISTINCT ltm.conversation_type) as conversation_types,
+                        COUNT(DISTINCT ltm.session_id) as session_count,
+                        MIN(ltm.created_at) as first_memory,
+                        MAX(ltm.created_at) as last_memory,
+                        GROUP_CONCAT(DISTINCT ltm.conversation_type) as types_list
+                    FROM long_term_memory ltm
+                    LEFT JOIN user_auth ua ON ltm.user_id = ua.user_id
+                    GROUP BY ltm.user_id, ua.name, ua.email
+                    ORDER BY total_memories DESC
+                """)
+            
+            users = []
+            for row in cursor.fetchall():
+                users.append({
+                    "user_id": row[0],
+                    "user_name": row[1],
+                    "user_email": row[2],
+                    "total_memories": row[3],
+                    "conversation_types": row[4],
+                    "session_count": row[5],
+                    "first_memory": row[6],
+                    "last_memory": row[7],
+                    "types_list": row[8] if row[8] else ""
+                })
+            
+            conn.close()
+            return {"users": users}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.get("/api/admin/long-term-memory/user/{user_id}")
+    async def get_user_long_term_memory_admin(user_id: str, admin_user: str = Depends(get_admin_user)):
+        """獲取指定用戶的所有長期記憶（管理員用）"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT 
+                        ltm.id, ltm.conversation_type, ltm.session_id, 
+                        ltm.message_role, ltm.message_content, ltm.metadata, ltm.created_at,
+                        COALESCE(ua.name, '未知') as name,
+                        COALESCE(ua.email, '未知') as email
+                    FROM long_term_memory ltm
+                    LEFT JOIN user_auth ua ON ltm.user_id = ua.user_id
+                    WHERE ltm.user_id = %s
+                    ORDER BY ltm.created_at DESC
+                    LIMIT 1000
+                """, (user_id,))
+            else:
+                cursor.execute("""
+                    SELECT 
+                        ltm.id, ltm.conversation_type, ltm.session_id, 
+                        ltm.message_role, ltm.message_content, ltm.metadata, ltm.created_at,
+                        COALESCE(ua.name, '未知') as name,
+                        COALESCE(ua.email, '未知') as email
+                    FROM long_term_memory ltm
+                    LEFT JOIN user_auth ua ON ltm.user_id = ua.user_id
+                    WHERE ltm.user_id = ?
+                    ORDER BY ltm.created_at DESC
+                    LIMIT 1000
+                """, (user_id,))
+            
+            memories = []
+            for row in cursor.fetchall():
+                memories.append({
+                    "id": row[0],
+                    "conversation_type": row[1],
+                    "session_id": row[2],
+                    "message_role": row[3],
+                    "message_content": row[4],
+                    "metadata": row[5],
+                    "created_at": row[6],
+                    "user_name": row[7],
+                    "user_email": row[8]
+                })
+            
+            conn.close()
+            return {"memories": memories, "user_id": user_id}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
     @app.get("/api/admin/memory-stats")
     async def get_memory_stats(admin_user: str = Depends(get_admin_user)):
         """獲取長期記憶統計（管理員用）"""
