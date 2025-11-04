@@ -539,7 +539,7 @@ def verify_access_token(token: str, allow_expired: bool = False) -> Optional[str
             now = datetime.now().timestamp()
             if exp < now:
                 print(f"DEBUG: verify_access_token - token 已過期，exp={exp}, now={now}, allow_expired={allow_expired}")
-            return None
+                return None
         
         user_id = payload.get("user_id")
         if allow_expired:
