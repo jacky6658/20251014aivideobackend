@@ -4,9 +4,16 @@ import hashlib
 import sqlite3
 import secrets
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Iterable
 from urllib.parse import urlparse
+
+# 台灣時區 (GMT+8)
+TAIWAN_TZ = timezone(timedelta(hours=8))
+
+def get_taiwan_time():
+    """獲取台灣時區的當前時間"""
+    return datetime.now(TAIWAN_TZ)
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -533,7 +540,7 @@ def generate_access_token(user_id: str) -> str:
     """生成訪問令牌"""
     payload = {
         "user_id": user_id,
-        "exp": datetime.now().timestamp() + 86400  # 24小時過期
+        "exp": get_taiwan_time().timestamp() + 86400  # 24小時過期
     }
     # 簡單的 JWT 實現（生產環境建議使用 PyJWT）
     import base64
@@ -573,7 +580,7 @@ def verify_access_token(token: str, allow_expired: bool = False) -> Optional[str
         # 檢查過期時間（如果 allow_expired=False）
         if not allow_expired:
             exp = payload.get("exp", 0)
-            now = datetime.now().timestamp()
+            now = get_taiwan_time().timestamp()
             if exp < now:
                 print(f"DEBUG: verify_access_token - token 已過期，exp={exp}, now={now}, allow_expired={allow_expired}")
                 return None
@@ -581,7 +588,7 @@ def verify_access_token(token: str, allow_expired: bool = False) -> Optional[str
         user_id = payload.get("user_id")
         if allow_expired:
             exp = payload.get("exp", 0)
-            now = datetime.now().timestamp()
+            now = get_taiwan_time().timestamp()
             is_expired = exp < now
             print(f"DEBUG: verify_access_token - 驗證成功，user_id={user_id}, 已過期={is_expired}, allow_expired={allow_expired}")
         return user_id
@@ -759,12 +766,12 @@ def save_conversation_summary(user_id: str, user_message: str, ai_response: str)
             cursor.execute("""
                 INSERT INTO conversation_summaries (user_id, summary, conversation_type, created_at)
                 VALUES (%s, %s, %s, %s)
-            """, (user_id, summary, conversation_type, datetime.now()))
+            """, (user_id, summary, conversation_type, get_taiwan_time()))
         else:
             cursor.execute("""
                 INSERT INTO conversation_summaries (user_id, summary, conversation_type, created_at)
                 VALUES (?, ?, ?, ?)
-            """, (user_id, summary, conversation_type, datetime.now()))
+            """, (user_id, summary, conversation_type, get_taiwan_time()))
 
         # 追蹤用戶偏好
         track_user_preferences(user_id, user_message, ai_response, conversation_type)
@@ -811,13 +818,13 @@ def track_user_preferences(user_id: str, user_message: str, ai_response: str, co
                         UPDATE user_preferences 
                         SET preference_value = %s, confidence_score = %s, updated_at = %s
                         WHERE id = %s
-                    """, (pref_value, new_confidence, datetime.now(), existing[0]))
+                    """, (pref_value, new_confidence, get_taiwan_time(), existing[0]))
                 else:
                     cursor.execute("""
                         UPDATE user_preferences 
                         SET preference_value = ?, confidence_score = ?, updated_at = ?
                         WHERE id = ?
-                    """, (pref_value, new_confidence, datetime.now(), existing[0]))
+                    """, (pref_value, new_confidence, get_taiwan_time(), existing[0]))
             else:
                 # 創建新偏好
                 if use_postgresql:
@@ -1279,13 +1286,13 @@ def create_app() -> FastAPI:
                 "gemini_configured": gemini_configured,
                 "gemini_test": gemini_test_result,
                 "model_name": model_name,
-                "timestamp": str(datetime.now())
+                "timestamp": str(get_taiwan_time())
             }
         except Exception as e:
             return {
                 "status": "error",
                 "error": str(e),
-                "timestamp": str(datetime.now())
+                "timestamp": str(get_taiwan_time())
             }
 
     @app.post("/api/generate/positioning")
@@ -2174,7 +2181,7 @@ def create_app() -> FastAPI:
     
     # 管理員長期記憶API
     @app.get("/api/admin/long-term-memory")
-    async def get_all_long_term_memory(conversation_type: Optional[str] = None, limit: int = 100, admin_user: str = Depends(get_admin_user)):
+    async def get_all_long_term_memory(conversation_type: Optional[str] = None, limit: int = 1000, admin_user: str = Depends(get_admin_user)):
         """獲取所有長期記憶記錄（管理員用）"""
         try:
             conn = get_db_connection()
@@ -3812,7 +3819,7 @@ def create_app() -> FastAPI:
                 if use_postgresql:
                     # PostgreSQL 語法
                     from datetime import timedelta
-                    expires_at_value = datetime.now() + timedelta(seconds=token_data.get("expires_in", 3600))
+                    expires_at_value = get_taiwan_time() + timedelta(seconds=token_data.get("expires_in", 3600))
                     
                     cursor.execute("""
                         INSERT INTO user_auth 
@@ -3850,7 +3857,7 @@ def create_app() -> FastAPI:
                         google_user.name,
                         google_user.picture,
                         access_token,
-                        datetime.now().timestamp() + token_data.get("expires_in", 3600),
+                        get_taiwan_time().timestamp() + token_data.get("expires_in", 3600),
                             0  # 新用戶預設為未訂閱
                     ))
                 
@@ -4009,7 +4016,7 @@ def create_app() -> FastAPI:
 
             # 計算到期日
             days = 30 if plan == "monthly" else 365
-            expires_dt = datetime.now() + timedelta(days=days)
+            expires_dt = get_taiwan_time() + timedelta(days=days)
 
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -4139,7 +4146,7 @@ def create_app() -> FastAPI:
                 if use_postgresql:
                     # PostgreSQL 語法
                     from datetime import timedelta
-                    expires_at_value = datetime.now() + timedelta(seconds=token_data.get("expires_in", 3600))
+                    expires_at_value = get_taiwan_time() + timedelta(seconds=token_data.get("expires_in", 3600))
                     
                     cursor.execute("""
                         INSERT INTO user_auth 
@@ -4228,7 +4235,7 @@ def create_app() -> FastAPI:
             
             # 生成新的 access token
             new_access_token = generate_access_token(current_user_id)
-            new_expires_at = datetime.now() + timedelta(hours=24)
+            new_expires_at = get_taiwan_time() + timedelta(hours=24)
             
             # 更新資料庫中的 token
             if use_postgresql:
@@ -4489,7 +4496,7 @@ def create_app() -> FastAPI:
                 }
             
             # 生成新的 ID
-            generation_id = hashlib.md5(f"{generation.user_id}_{datetime.now().isoformat()}".encode()).hexdigest()[:12]
+            generation_id = hashlib.md5(f"{generation.user_id}_{get_taiwan_time().isoformat()}".encode()).hexdigest()[:12]
             
             # 保存新生成內容
             if use_postgresql:
@@ -4617,7 +4624,7 @@ def create_app() -> FastAPI:
                     INSERT INTO conversation_summaries (user_id, summary, conversation_type, created_at, message_count, updated_at)
                     VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                 """, (
-                    user_id, summary, classify_conversation(user_message=messages[-1].content if messages else "", ai_response=summary), datetime.now(), message_cnt
+                    user_id, summary, classify_conversation(user_message=messages[-1].content if messages else "", ai_response=summary), get_taiwan_time(), message_cnt
                 ))
             else:
                 cursor.execute("""
