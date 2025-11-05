@@ -4502,6 +4502,368 @@ def create_app() -> FastAPI:
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    # ===== n8n 自動匯出 API =====
+    
+    @app.post("/api/v1/export/all")
+    async def export_all_data(request: Request):
+        """匯出所有資料到單一 CSV 檔案（供 n8n 使用）
+        
+        請求格式：
+        {
+            "from": "2025-11-01T00:00:00Z",  # 可選：開始時間
+            "to": "2025-11-02T00:00:00Z",    # 可選：結束時間
+            "api_key": "your_api_key"        # 可選：API 金鑰驗證
+        }
+        
+        回應：直接返回 CSV 檔案（所有表格合併）
+        """
+        import csv
+        import io
+        from datetime import datetime
+        
+        try:
+            # 獲取請求參數
+            data = await request.json()
+            from_date = data.get("from")
+            to_date = data.get("to")
+            api_key = data.get("api_key")
+            
+            # 簡單的 API Key 驗證（可選，如果需要的話）
+            # 可以從環境變數讀取預設的 API Key
+            expected_api_key = os.getenv("N8N_EXPORT_API_KEY")
+            if expected_api_key and api_key != expected_api_key:
+                return JSONResponse(
+                    {"error": "無效的 API Key"},
+                    status_code=401
+                )
+            
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 構建時間過濾條件
+            time_filter = ""
+            time_params = []
+            if from_date or to_date:
+                conditions = []
+                if from_date:
+                    if use_postgresql:
+                        conditions.append("created_at >= %s")
+                    else:
+                        conditions.append("created_at >= ?")
+                    time_params.append(from_date)
+                if to_date:
+                    if use_postgresql:
+                        conditions.append("created_at <= %s")
+                    else:
+                        conditions.append("created_at <= ?")
+                    time_params.append(to_date)
+                if conditions:
+                    time_filter = "WHERE " + " AND ".join(conditions)
+            
+            # 定義統一的 CSV 欄位（包含所有表格的欄位）
+            # 這樣可以確保所有資料都在同一個 CSV 中
+            csv_headers = [
+                '資料表',           # 標識資料來源
+                '記錄ID',           # 通用 ID
+                '用戶ID',           # 通用用戶 ID
+                '用戶名稱',          # 用戶名稱
+                'Email',            # 用戶 Email
+                '平台',             # 平台資訊
+                '主題',             # 主題/分類
+                '標題',             # 標題
+                '內容',             # 內容/摘要
+                '對話類型',          # 對話類型
+                '腳本ID',           # 腳本 ID
+                '訂單ID',           # 訂單 ID
+                '金額',             # 金額
+                '狀態',             # 狀態
+                '支付方式',          # 支付方式
+                '是否訂閱',          # 訂閱狀態
+                '創建時間',          # 創建時間
+                '更新時間'           # 更新時間
+            ]
+            
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(csv_headers)
+            
+            # 1. 匯出用戶資料 (users)
+            if use_postgresql:
+                cursor.execute(f"""
+                    SELECT user_id, name, email, created_at, updated_at, is_subscribed
+                    FROM user_auth
+                    {time_filter}
+                    ORDER BY created_at DESC
+                """, tuple(time_params))
+            else:
+                cursor.execute(f"""
+                    SELECT user_id, name, email, created_at, updated_at, is_subscribed
+                    FROM user_auth
+                    {time_filter}
+                    ORDER BY created_at DESC
+                """, tuple(time_params))
+            
+            for row in cursor.fetchall():
+                writer.writerow([
+                    'users',           # 資料表
+                    row[0],            # 記錄ID (user_id)
+                    row[0],            # 用戶ID
+                    row[1] or '',       # 用戶名稱
+                    row[2] or '',       # Email
+                    '',                # 平台
+                    '',                # 主題
+                    '',                # 標題
+                    '',                # 內容
+                    '',                # 對話類型
+                    '',                # 腳本ID
+                    '',                # 訂單ID
+                    '',                # 金額
+                    '',                # 狀態
+                    '',                # 支付方式
+                    '是' if row[5] else '否',  # 是否訂閱
+                    str(row[3]) if row[3] else '',  # 創建時間
+                    str(row[4]) if row[4] else ''   # 更新時間
+                ])
+            
+            # 2. 匯出腳本資料 (projects/user_scripts)
+            script_time_filter = time_filter.replace("created_at", "us.created_at") if time_filter else ""
+            if use_postgresql:
+                cursor.execute(f"""
+                    SELECT us.id, us.user_id, ua.name, ua.email, us.platform, us.topic, us.title, 
+                           us.content, us.created_at, us.updated_at
+                    FROM user_scripts us
+                    LEFT JOIN user_auth ua ON us.user_id = ua.user_id
+                    {script_time_filter}
+                    ORDER BY us.created_at DESC
+                """, tuple(time_params))
+            else:
+                cursor.execute(f"""
+                    SELECT us.id, us.user_id, ua.name, ua.email, us.platform, us.topic, us.title, 
+                           us.content, us.created_at, us.updated_at
+                    FROM user_scripts us
+                    LEFT JOIN user_auth ua ON us.user_id = ua.user_id
+                    {script_time_filter}
+                    ORDER BY us.created_at DESC
+                """, tuple(time_params))
+            
+            for row in cursor.fetchall():
+                writer.writerow([
+                    'projects',        # 資料表
+                    str(row[0]),       # 記錄ID (script id)
+                    row[1] or '',       # 用戶ID
+                    row[2] or '',       # 用戶名稱
+                    row[3] or '',       # Email
+                    row[4] or '',       # 平台
+                    row[5] or '',       # 主題
+                    row[6] or '',       # 標題
+                    (row[7] or '')[:500] if row[7] else '',  # 內容（限制長度）
+                    '',                # 對話類型
+                    str(row[0]),       # 腳本ID
+                    '',                # 訂單ID
+                    '',                # 金額
+                    '',                # 狀態
+                    '',                # 支付方式
+                    '',                # 是否訂閱
+                    str(row[8]) if row[8] else '',  # 創建時間
+                    str(row[9]) if row[9] else ''   # 更新時間
+                ])
+            
+            # 3. 匯出生成記錄 (generations)
+            gen_time_filter = time_filter.replace("created_at", "g.created_at") if time_filter else ""
+            if use_postgresql:
+                cursor.execute(f"""
+                    SELECT g.id, g.user_id, ua.name, ua.email, g.platform, g.topic, g.content, g.created_at
+                    FROM generations g
+                    LEFT JOIN user_auth ua ON g.user_id = ua.user_id
+                    {gen_time_filter}
+                    ORDER BY g.created_at DESC
+                """, tuple(time_params))
+            else:
+                cursor.execute(f"""
+                    SELECT g.id, g.user_id, ua.name, ua.email, g.platform, g.topic, g.content, g.created_at
+                    FROM generations g
+                    LEFT JOIN user_auth ua ON g.user_id = ua.user_id
+                    {gen_time_filter}
+                    ORDER BY g.created_at DESC
+                """, tuple(time_params))
+            
+            for row in cursor.fetchall():
+                writer.writerow([
+                    'generations',     # 資料表
+                    row[0] or '',      # 記錄ID
+                    row[1] or '',      # 用戶ID
+                    row[2] or '',      # 用戶名稱
+                    row[3] or '',      # Email
+                    row[4] or '',      # 平台
+                    row[5] or '',      # 主題
+                    '',               # 標題
+                    (row[6] or '')[:500] if row[6] else '',  # 內容（限制長度）
+                    '',               # 對話類型
+                    '',               # 腳本ID
+                    '',               # 訂單ID
+                    '',               # 金額
+                    '',               # 狀態
+                    '',               # 支付方式
+                    '',               # 是否訂閱
+                    str(row[7]) if row[7] else '',  # 創建時間
+                    ''                # 更新時間
+                ])
+            
+            # 4. 匯出對話記錄 (conversations)
+            conv_time_filter = time_filter.replace("created_at", "cs.created_at") if time_filter else ""
+            if use_postgresql:
+                cursor.execute(f"""
+                    SELECT cs.id, cs.user_id, ua.name, ua.email, cs.conversation_type, cs.summary, cs.created_at
+                    FROM conversation_summaries cs
+                    LEFT JOIN user_auth ua ON cs.user_id = ua.user_id
+                    {conv_time_filter}
+                    ORDER BY cs.created_at DESC
+                """, tuple(time_params))
+            else:
+                cursor.execute(f"""
+                    SELECT cs.id, cs.user_id, ua.name, ua.email, cs.conversation_type, cs.summary, cs.created_at
+                    FROM conversation_summaries cs
+                    LEFT JOIN user_auth ua ON cs.user_id = ua.user_id
+                    {conv_time_filter}
+                    ORDER BY cs.created_at DESC
+                """, tuple(time_params))
+            
+            for row in cursor.fetchall():
+                writer.writerow([
+                    'conversations',   # 資料表
+                    str(row[0]),      # 記錄ID
+                    row[1] or '',      # 用戶ID
+                    row[2] or '',      # 用戶名稱
+                    row[3] or '',      # Email
+                    '',               # 平台
+                    '',               # 主題
+                    '',               # 標題
+                    (row[5] or '')[:500] if row[5] else '',  # 內容（摘要）
+                    row[4] or '',      # 對話類型
+                    '',               # 腳本ID
+                    '',               # 訂單ID
+                    '',               # 金額
+                    '',               # 狀態
+                    '',               # 支付方式
+                    '',               # 是否訂閱
+                    str(row[6]) if row[6] else '',  # 創建時間
+                    ''                # 更新時間
+                ])
+            
+            # 5. 匯出訂單記錄 (payments/orders)
+            order_time_filter = time_filter.replace("created_at", "o.created_at") if time_filter else ""
+            if use_postgresql:
+                cursor.execute(f"""
+                    SELECT o.id, o.user_id, ua.name, ua.email, o.order_id, o.amount, o.payment_status, 
+                           o.payment_method, o.created_at, o.updated_at
+                    FROM orders o
+                    LEFT JOIN user_auth ua ON o.user_id = ua.user_id
+                    {order_time_filter}
+                    ORDER BY o.created_at DESC
+                """, tuple(time_params))
+            else:
+                cursor.execute(f"""
+                    SELECT o.id, o.user_id, ua.name, ua.email, o.order_id, o.amount, o.payment_status, 
+                           o.payment_method, o.created_at, o.updated_at
+                    FROM orders o
+                    LEFT JOIN user_auth ua ON o.user_id = ua.user_id
+                    {order_time_filter}
+                    ORDER BY o.created_at DESC
+                """, tuple(time_params))
+            
+            for row in cursor.fetchall():
+                writer.writerow([
+                    'payments',        # 資料表
+                    str(row[0]),       # 記錄ID
+                    row[1] or '',      # 用戶ID
+                    row[2] or '',      # 用戶名稱
+                    row[3] or '',      # Email
+                    '',               # 平台
+                    '',               # 主題
+                    '',               # 標題
+                    '',               # 內容
+                    '',               # 對話類型
+                    '',               # 腳本ID
+                    row[4] or '',      # 訂單ID
+                    str(row[5]) if row[5] else '',  # 金額
+                    row[6] or '',      # 狀態
+                    row[7] or '',      # 支付方式
+                    '',               # 是否訂閱
+                    str(row[8]) if row[8] else '',  # 創建時間
+                    str(row[9]) if row[9] else ''   # 更新時間
+                ])
+            
+            # 6. 匯出行為記錄 (events_raw/user_behaviors)
+            behavior_time_filter = time_filter.replace("created_at", "created_at") if time_filter else ""
+            if use_postgresql:
+                cursor.execute(f"""
+                    SELECT id, user_id, behavior_type, behavior_data, created_at
+                    FROM user_behaviors
+                    {behavior_time_filter}
+                    ORDER BY created_at DESC
+                    LIMIT 10000
+                """, tuple(time_params))
+            else:
+                cursor.execute(f"""
+                    SELECT id, user_id, behavior_type, behavior_data, created_at
+                    FROM user_behaviors
+                    {behavior_time_filter}
+                    ORDER BY created_at DESC
+                    LIMIT 10000
+                """, tuple(time_params))
+            
+            for row in cursor.fetchall():
+                writer.writerow([
+                    'events_raw',      # 資料表
+                    str(row[0]),      # 記錄ID
+                    row[1] or '',      # 用戶ID
+                    '',               # 用戶名稱
+                    '',               # Email
+                    '',               # 平台
+                    '',               # 主題
+                    '',               # 標題
+                    row[3] or '',      # 內容（行為資料）
+                    row[2] or '',      # 對話類型（行為類型）
+                    '',               # 腳本ID
+                    '',               # 訂單ID
+                    '',               # 金額
+                    '',               # 狀態
+                    '',               # 支付方式
+                    '',               # 是否訂閱
+                    str(row[4]) if row[4] else '',  # 創建時間
+                    ''                # 更新時間
+                ])
+            
+            conn.close()
+            
+            output.seek(0)
+            csv_content = output.getvalue()
+            
+            # 生成檔案名稱（包含時間戳）
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"reelmind_export_{timestamp}.csv"
+            
+            return Response(
+                content=csv_content.encode('utf-8-sig'),  # 使用 BOM 以支援 Excel
+                media_type="text/csv; charset=utf-8",
+                headers={
+                    "Content-Disposition": f"attachment; filename={filename}",
+                    "Content-Type": "text/csv; charset=utf-8"
+                }
+            )
+            
+        except Exception as e:
+            print(f"匯出錯誤: {e}")
+            import traceback
+            traceback.print_exc()
+            return JSONResponse(
+                {"error": f"匯出失敗: {str(e)}"},
+                status_code=500
+            )
+
     # ===== OAuth 認證功能 =====
     
     @app.get("/api/auth/google")
