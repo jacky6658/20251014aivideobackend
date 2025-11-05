@@ -617,7 +617,7 @@ def verify_access_token(token: str, allow_expired: bool = False) -> Optional[str
             now = get_taiwan_time().timestamp()
             if exp < now:
                 print(f"DEBUG: verify_access_token - token 已過期，exp={exp}, now={now}, allow_expired={allow_expired}")
-                return None
+            return None
         
         user_id = payload.get("user_id")
         if allow_expired:
@@ -695,7 +695,7 @@ async def get_admin_user(credentials: HTTPAuthorizationCredentials = Depends(sec
     admin_ids = os.getenv("ADMIN_USER_IDS", "").split(",")
     admin_ids = [x.strip() for x in admin_ids if x.strip()]
     if user_id in admin_ids:
-        return user_id
+    return user_id
     
     # 方式 2: 檢查 email 是否在白名單中
     admin_emails = os.getenv("ADMIN_EMAILS", "").split(",")
@@ -2989,26 +2989,91 @@ def create_app() -> FastAPI:
         try:
             data = await request.json()
             is_subscribed = data.get("is_subscribed", 0)
+            # 可選：設定訂閱期限（天數），預設為 30 天（1個月）
+            subscription_days = data.get("subscription_days", 30)
             
             conn = get_db_connection()
             cursor = conn.cursor()
             
-            # 更新訂閱狀態
             database_url = os.getenv("DATABASE_URL")
             use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
             
-            if use_postgresql:
-                cursor.execute("""
-                    UPDATE user_auth 
-                    SET is_subscribed = %s, updated_at = CURRENT_TIMESTAMP
-                    WHERE user_id = %s
-                """, (1 if is_subscribed else 0, user_id))
+            if is_subscribed:
+                # 啟用訂閱：更新 user_auth 並在 licenses 表中創建/更新記錄
+                # 計算到期日（預設為 30 天後）
+                expires_dt = get_taiwan_time() + timedelta(days=subscription_days)
+                
+                # 更新 user_auth 訂閱狀態
+                if use_postgresql:
+                    cursor.execute("""
+                        UPDATE user_auth 
+                        SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP
+                        WHERE user_id = %s
+                    """, (user_id,))
+                    
+                    # 更新/建立 licenses 記錄
+                    try:
+                        cursor.execute("""
+                            INSERT INTO licenses (user_id, tier, seats, expires_at, status, source, updated_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                            ON CONFLICT (user_id)
+                            DO UPDATE SET
+                                expires_at = EXCLUDED.expires_at,
+                                status = EXCLUDED.status,
+                                updated_at = CURRENT_TIMESTAMP
+                        """, (user_id, "personal", 1, expires_dt, "active", "admin_manual"))
+                    except Exception as e:
+                        print(f"WARN: 更新 licenses 表失敗: {e}")
+                else:
+                    cursor.execute("""
+                        UPDATE user_auth 
+                        SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP
+                        WHERE user_id = ?
+                    """, (user_id,))
+                    
+                    # 更新/建立 licenses 記錄
+                    try:
+                        cursor.execute("""
+                            INSERT OR REPLACE INTO licenses
+                            (user_id, tier, seats, expires_at, status, source, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        """, (user_id, "personal", 1, expires_dt.timestamp(), "active", "admin_manual"))
+                    except Exception as e:
+                        print(f"WARN: 更新 licenses 表失敗: {e}")
             else:
-                cursor.execute("""
-                    UPDATE user_auth 
-                    SET is_subscribed = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE user_id = ?
-                """, (1 if is_subscribed else 0, user_id))
+                # 取消訂閱：更新 user_auth 並將 licenses 狀態設為 cancelled
+                if use_postgresql:
+                    cursor.execute("""
+                        UPDATE user_auth 
+                        SET is_subscribed = 0, updated_at = CURRENT_TIMESTAMP
+                        WHERE user_id = %s
+                    """, (user_id,))
+                    
+                    # 將 licenses 狀態設為 cancelled
+                    try:
+                        cursor.execute("""
+                            UPDATE licenses 
+                            SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+                            WHERE user_id = %s
+                        """, (user_id,))
+                    except Exception as e:
+                        print(f"WARN: 更新 licenses 表失敗: {e}")
+                else:
+                    cursor.execute("""
+                        UPDATE user_auth 
+                        SET is_subscribed = 0, updated_at = CURRENT_TIMESTAMP
+                        WHERE user_id = ?
+                    """, (user_id,))
+                    
+                    # 將 licenses 狀態設為 cancelled
+                    try:
+                        cursor.execute("""
+                            UPDATE licenses 
+                            SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+                            WHERE user_id = ?
+                        """, (user_id,))
+                    except Exception as e:
+                        print(f"WARN: 更新 licenses 表失敗: {e}")
             
             if not use_postgresql:
                 conn.commit()
@@ -3016,9 +3081,10 @@ def create_app() -> FastAPI:
             
             return {
                 "success": True,
-                "message": "訂閱狀態已更新",
+                "message": f"訂閱狀態已{'啟用' if is_subscribed else '取消'}",
                 "user_id": user_id,
-                "is_subscribed": bool(is_subscribed)
+                "is_subscribed": bool(is_subscribed),
+                "expires_at": str(expires_dt) if is_subscribed else None
             }
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -3403,7 +3469,7 @@ def create_app() -> FastAPI:
             
             # 計算各模式統計
             mode_stats = {
-                "mode1_quick_generate": {"count": 0, "success_rate": 0},
+                "mode1_quick_generate": {"count": 0, "completion_rate": 0},
                 "mode2_ai_consultant": {"count": 0, "avg_turns": 0},
                 "mode3_ip_planning": {"count": 0, "profiles_generated": 0}
             }
@@ -3416,6 +3482,63 @@ def create_app() -> FastAPI:
                     mode_stats["mode2_ai_consultant"]["count"] += count
                 elif conv_type == "general_consultation":
                     mode_stats["mode2_ai_consultant"]["count"] += count
+                elif conv_type == "ip_planning":
+                    mode_stats["mode3_ip_planning"]["count"] += count
+            
+            # 計算 Mode1 完成率：有進行帳號定位對話且有保存腳本的用戶比例
+            if mode_stats["mode1_quick_generate"]["count"] > 0:
+                # 獲取進行過帳號定位對話的用戶數
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT user_id) as user_count
+                    FROM conversation_summaries
+                    WHERE conversation_type = 'account_positioning'
+                """)
+                positioning_users_result = cursor.fetchone()
+                total_users = positioning_users_result[0] if positioning_users_result and positioning_users_result[0] else 0
+                
+                # 獲取有保存腳本的用戶數（這些用戶完成了整個流程）
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT cs.user_id) as completion_count
+                    FROM conversation_summaries cs
+                    INNER JOIN user_scripts us ON cs.user_id = us.user_id
+                    WHERE cs.conversation_type = 'account_positioning'
+                    AND us.created_at >= cs.created_at
+                """)
+                completion_result = cursor.fetchone()
+                completion_count = completion_result[0] if completion_result and completion_result[0] else 0
+                
+                # 計算完成率
+                if total_users > 0:
+                    completion_rate = round((completion_count / total_users) * 100, 1)
+                    mode_stats["mode1_quick_generate"]["completion_rate"] = completion_rate
+                else:
+                    mode_stats["mode1_quick_generate"]["completion_rate"] = 0
+            else:
+                mode_stats["mode1_quick_generate"]["completion_rate"] = 0
+            
+            # 從長期記憶表統計 IP 人設規劃的使用次數（如果 conversation_summaries 沒有記錄）
+            # 因為 IP 人設規劃主要通過長期記憶 API 記錄
+            cursor.execute("""
+                SELECT COUNT(DISTINCT session_id) as session_count, COUNT(DISTINCT user_id) as user_count
+                FROM long_term_memory
+                WHERE conversation_type = 'ip_planning'
+            """)
+            ip_planning_stats = cursor.fetchone()
+            if ip_planning_stats:
+                session_count = ip_planning_stats[0] if ip_planning_stats[0] else 0
+                # 如果 conversation_summaries 沒有記錄，使用長期記憶的會話數
+                if mode_stats["mode3_ip_planning"]["count"] == 0 and session_count > 0:
+                    mode_stats["mode3_ip_planning"]["count"] = session_count
+            
+            # 統計 IP 人設規劃生成的 Profile 數量（從 user_profiles 表或相關記錄）
+            cursor.execute("""
+                SELECT COUNT(DISTINCT user_id) as profile_count
+                FROM long_term_memory
+                WHERE conversation_type = 'ip_planning'
+            """)
+            profile_result = cursor.fetchone()
+            if profile_result and profile_result[0]:
+                mode_stats["mode3_ip_planning"]["profiles_generated"] = profile_result[0]
             
             # 獲取時間分布
             if use_postgresql:
@@ -4134,15 +4257,15 @@ def create_app() -> FastAPI:
                         )
                     else:
                         # 生產環境：Redirect 到前端的 popup-callback.html 頁面
-                        # 該頁面會使用 postMessage 傳遞 token 給主視窗並自動關閉
-                        callback_url = (
-                            f"{frontend_base}/auth/popup-callback.html"
-                            f"?token={safe_token}"
-                            f"&user_id={safe_user_id}"
-                            f"&email={safe_email}"
-                            f"&name={safe_name}"
-                            f"&picture={safe_picture}"
-                        )
+                # 該頁面會使用 postMessage 傳遞 token 給主視窗並自動關閉
+                callback_url = (
+                    f"{frontend_base}/auth/popup-callback.html"
+                    f"?token={safe_token}"
+                    f"&user_id={safe_user_id}"
+                    f"&email={safe_email}"
+                    f"&name={safe_name}"
+                    f"&picture={safe_picture}"
+                )
                 
                 print(f"DEBUG: Redirecting to callback URL: {callback_url}")
                 
