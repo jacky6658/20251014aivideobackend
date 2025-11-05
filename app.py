@@ -3693,8 +3693,19 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.get("/api/admin/conversations")
-    async def get_all_conversations(admin_user: str = Depends(get_admin_user)):
-        """獲取所有對話記錄（管理員用）"""
+    async def get_all_conversations(
+        admin_user: str = Depends(get_admin_user),
+        page: int = 1,
+        limit: int = 100,
+        conversation_type: Optional[str] = None
+    ):
+        """獲取所有對話記錄（管理員用）
+        
+        Args:
+            page: 頁碼（從1開始）
+            limit: 每頁記錄數（默認100）
+            conversation_type: 可選的對話類型篩選
+        """
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -3702,24 +3713,49 @@ def create_app() -> FastAPI:
             database_url = os.getenv("DATABASE_URL")
             use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
             
+            # 計算偏移量
+            offset = (page - 1) * limit
+            
+            # 構建查詢條件
+            where_clause = ""
+            params = []
+            
+            if conversation_type:
+                where_clause = "WHERE cs.conversation_type = %s" if use_postgresql else "WHERE cs.conversation_type = ?"
+                params.append(conversation_type)
+            
+            # 獲取總數（用於分頁）
             if use_postgresql:
-                cursor.execute("""
-                    SELECT cs.id, cs.user_id, cs.conversation_type, cs.summary, cs.message_count, cs.created_at, 
-                           ua.name, ua.email
-                    FROM conversation_summaries cs
-                    LEFT JOIN user_auth ua ON cs.user_id = ua.user_id
-                    ORDER BY cs.created_at DESC
-                    LIMIT 100
-                """)
+                count_query = f"SELECT COUNT(*) FROM conversation_summaries cs {where_clause}"
             else:
-                cursor.execute("""
+                count_query = f"SELECT COUNT(*) FROM conversation_summaries cs {where_clause}"
+            
+            cursor.execute(count_query, params if params else None)
+            total_count = cursor.fetchone()[0]
+            
+            # 獲取對話記錄
+            if use_postgresql:
+                query = f"""
                     SELECT cs.id, cs.user_id, cs.conversation_type, cs.summary, cs.message_count, cs.created_at, 
                            ua.name, ua.email
                     FROM conversation_summaries cs
                     LEFT JOIN user_auth ua ON cs.user_id = ua.user_id
+                    {where_clause}
                     ORDER BY cs.created_at DESC
-                    LIMIT 100
-                """)
+                    LIMIT %s OFFSET %s
+                """
+                cursor.execute(query, params + [limit, offset])
+            else:
+                query = f"""
+                    SELECT cs.id, cs.user_id, cs.conversation_type, cs.summary, cs.message_count, cs.created_at, 
+                           ua.name, ua.email
+                    FROM conversation_summaries cs
+                    LEFT JOIN user_auth ua ON cs.user_id = ua.user_id
+                    {where_clause}
+                    ORDER BY cs.created_at DESC
+                    LIMIT ? OFFSET ?
+                """
+                cursor.execute(query, params + [limit, offset])
             
             conversations = []
             conv_type_map = {
@@ -3745,7 +3781,20 @@ def create_app() -> FastAPI:
             
             conn.close()
             
-            return {"conversations": conversations}
+            # 計算分頁資訊
+            total_pages = (total_count + limit - 1) // limit if total_count > 0 else 0
+            
+            return {
+                "conversations": conversations,
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": total_count,
+                    "total_pages": total_pages,
+                    "has_next": page < total_pages,
+                    "has_prev": page > 1
+                }
+            }
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
     
