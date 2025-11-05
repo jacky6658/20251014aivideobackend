@@ -3859,7 +3859,7 @@ def create_app() -> FastAPI:
             
             if use_postgresql:
                 cursor.execute("""
-                    SELECT us.id, us.user_id, us.script_name, us.title, us.platform, us.topic, 
+                    SELECT us.id, us.user_id, us.script_name, us.title, us.content, us.platform, us.topic, 
                            us.created_at, ua.name, ua.email
                     FROM user_scripts us
                     LEFT JOIN user_auth ua ON us.user_id = ua.user_id
@@ -3868,7 +3868,7 @@ def create_app() -> FastAPI:
                 """)
             else:
                 cursor.execute("""
-                    SELECT us.id, us.user_id, us.script_name, us.title, us.platform, us.topic, 
+                    SELECT us.id, us.user_id, us.script_name, us.title, us.content, us.platform, us.topic, 
                            us.created_at, ua.name, ua.email
                     FROM user_scripts us
                     LEFT JOIN user_auth ua ON us.user_id = ua.user_id
@@ -3883,17 +3883,53 @@ def create_app() -> FastAPI:
                     "user_id": row[1],
                     "name": row[2] or row[3] or "未命名腳本",
                     "title": row[3] or row[2] or "未命名腳本",
-                    "platform": row[4] or "未設定",
-                    "category": row[5] or "未分類",
-                    "topic": row[5] or "未分類",
-                    "created_at": row[6],
-                    "user_name": row[7] or "未知用戶",
-                    "user_email": row[8] or ""
+                    "content": row[4] or "",
+                    "script_content": row[4] or "",
+                    "platform": row[5] or "未設定",
+                    "category": row[6] or "未分類",
+                    "topic": row[6] or "未分類",
+                    "created_at": row[7],
+                    "user_name": row[8] or "未知用戶",
+                    "user_email": row[9] or ""
                 })
             
             conn.close()
             
             return {"scripts": scripts}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.delete("/api/admin/scripts/{script_id}")
+    async def delete_script_admin(script_id: int, admin_user: str = Depends(get_admin_user)):
+        """刪除腳本（管理員用）"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 檢查腳本是否存在
+            if use_postgresql:
+                cursor.execute("SELECT id FROM user_scripts WHERE id = %s", (script_id,))
+            else:
+                cursor.execute("SELECT id FROM user_scripts WHERE id = ?", (script_id,))
+            
+            if not cursor.fetchone():
+                conn.close()
+                return JSONResponse({"error": "腳本不存在"}, status_code=404)
+            
+            # 刪除腳本
+            if use_postgresql:
+                cursor.execute("DELETE FROM user_scripts WHERE id = %s", (script_id,))
+            else:
+                cursor.execute("DELETE FROM user_scripts WHERE id = ?", (script_id,))
+            
+            if not use_postgresql:
+                conn.commit()
+            conn.close()
+            
+            return {"success": True, "message": "腳本已刪除"}
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
     
