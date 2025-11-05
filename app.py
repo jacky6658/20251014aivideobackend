@@ -4864,6 +4864,218 @@ def create_app() -> FastAPI:
                 status_code=500
             )
 
+    @app.post("/api/v1/sheets/{export_type}")
+    async def export_for_sheets(export_type: str, request: Request):
+        """以 JSON 物件列表輸出指定資料類型，方便 n8n → Google Sheet。
+
+        Body 參數：
+        {
+            "from": "2025-11-01T00:00:00Z",  # 可選
+            "to":   "2025-11-05T23:59:59Z",  # 可選
+            "api_key": "..."                 # 可選，若環境有設 N8N_EXPORT_API_KEY 則必填
+        }
+        回應：{
+            "type": "users" | ...,
+            "count": 123,
+            "rows": [ {欄位: 值, ...}, ... ]
+        }
+        """
+        try:
+            data = await request.json()
+            from_date = data.get("from")
+            to_date = data.get("to")
+            api_key = data.get("api_key")
+            limit = int(data.get("limit", 10000))
+
+            expected_api_key = os.getenv("N8N_EXPORT_API_KEY")
+            if expected_api_key and api_key != expected_api_key:
+                return JSONResponse({"error": "無效的 API Key"}, status_code=401)
+
+            conn = get_db_connection()
+            cursor = conn.cursor()
+
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+
+            def build_time_filter(column_name: str) -> tuple[str, list]:
+                tf = ""
+                params: list = []
+                if from_date or to_date:
+                    conds = []
+                    if from_date:
+                        conds.append(f"{column_name} >= %s" if use_postgresql else f"{column_name} >= ?")
+                        params.append(from_date)
+                    if to_date:
+                        conds.append(f"{column_name} <= %s" if use_postgresql else f"{column_name} <= ?")
+                        params.append(to_date)
+                    tf = "WHERE " + " AND ".join(conds)
+                return tf, params
+
+            rows = []
+
+            if export_type == "users":
+                time_filter, params = build_time_filter("created_at")
+                cursor.execute(
+                    f"""
+                    SELECT user_id, name, email, is_subscribed, created_at, updated_at
+                    FROM user_auth
+                    {time_filter}
+                    ORDER BY created_at DESC
+                    LIMIT {limit}
+                    """,
+                    tuple(params)
+                )
+                for r in cursor.fetchall():
+                    rows.append({
+                        "user_id": r[0],
+                        "name": r[1] or "",
+                        "email": r[2] or "",
+                        "is_subscribed": bool(r[3]) if r[3] is not None else False,
+                        "created_at": str(r[4]) if r[4] else "",
+                        "updated_at": str(r[5]) if r[5] else ""
+                    })
+
+            elif export_type == "scripts":
+                time_filter, params = build_time_filter("us.created_at")
+                cursor.execute(
+                    f"""
+                    SELECT us.id, us.user_id, ua.name, ua.email, us.platform, us.topic, us.title,
+                           us.content, us.created_at, us.updated_at
+                    FROM user_scripts us
+                    LEFT JOIN user_auth ua ON us.user_id = ua.user_id
+                    {time_filter}
+                    ORDER BY us.created_at DESC
+                    LIMIT {limit}
+                    """,
+                    tuple(params)
+                )
+                for r in cursor.fetchall():
+                    rows.append({
+                        "id": r[0],
+                        "user_id": r[1],
+                        "user_name": r[2] or "",
+                        "email": r[3] or "",
+                        "platform": r[4] or "",
+                        "topic": r[5] or "",
+                        "title": r[6] or "",
+                        "content": (r[7] or ""),
+                        "created_at": str(r[8]) if r[8] else "",
+                        "updated_at": str(r[9]) if r[9] else ""
+                    })
+
+            elif export_type == "generations":
+                time_filter, params = build_time_filter("g.created_at")
+                cursor.execute(
+                    f"""
+                    SELECT g.id, g.user_id, ua.name, ua.email, g.platform, g.topic, g.content, g.created_at
+                    FROM generations g
+                    LEFT JOIN user_auth ua ON g.user_id = ua.user_id
+                    {time_filter}
+                    ORDER BY g.created_at DESC
+                    LIMIT {limit}
+                    """,
+                    tuple(params)
+                )
+                for r in cursor.fetchall():
+                    rows.append({
+                        "id": r[0],
+                        "user_id": r[1],
+                        "user_name": r[2] or "",
+                        "email": r[3] or "",
+                        "platform": r[4] or "",
+                        "topic": r[5] or "",
+                        "content": (r[6] or ""),
+                        "created_at": str(r[7]) if r[7] else ""
+                    })
+
+            elif export_type == "conversations":
+                time_filter, params = build_time_filter("cs.created_at")
+                cursor.execute(
+                    f"""
+                    SELECT cs.id, cs.user_id, ua.name, ua.email, cs.conversation_type, cs.summary, cs.created_at
+                    FROM conversation_summaries cs
+                    LEFT JOIN user_auth ua ON cs.user_id = ua.user_id
+                    {time_filter}
+                    ORDER BY cs.created_at DESC
+                    LIMIT {limit}
+                    """,
+                    tuple(params)
+                )
+                for r in cursor.fetchall():
+                    rows.append({
+                        "id": r[0],
+                        "user_id": r[1],
+                        "user_name": r[2] or "",
+                        "email": r[3] or "",
+                        "conversation_type": r[4] or "",
+                        "summary": (r[5] or ""),
+                        "created_at": str(r[6]) if r[6] else ""
+                    })
+
+            elif export_type == "orders":
+                time_filter, params = build_time_filter("o.created_at")
+                cursor.execute(
+                    f"""
+                    SELECT o.id, o.user_id, ua.name, ua.email, o.order_id, o.amount, o.payment_status,
+                           o.payment_method, o.created_at, o.updated_at
+                    FROM orders o
+                    LEFT JOIN user_auth ua ON o.user_id = ua.user_id
+                    {time_filter}
+                    ORDER BY o.created_at DESC
+                    LIMIT {limit}
+                    """,
+                    tuple(params)
+                )
+                for r in cursor.fetchall():
+                    rows.append({
+                        "id": r[0],
+                        "user_id": r[1],
+                        "user_name": r[2] or "",
+                        "email": r[3] or "",
+                        "order_id": r[4] or "",
+                        "amount": float(r[5]) if r[5] is not None else 0.0,
+                        "payment_status": r[6] or "",
+                        "payment_method": r[7] or "",
+                        "created_at": str(r[8]) if r[8] else "",
+                        "updated_at": str(r[9]) if r[9] else ""
+                    })
+
+            elif export_type == "long-term-memory":
+                time_filter, params = build_time_filter("ltm.created_at")
+                cursor.execute(
+                    f"""
+                    SELECT ltm.id, ua.name, ltm.user_id, ltm.session_id, ltm.conversation_type,
+                           ltm.role, ltm.content, ltm.created_at
+                    FROM long_term_memory ltm
+                    LEFT JOIN user_auth ua ON ltm.user_id = ua.user_id
+                    {time_filter}
+                    ORDER BY ltm.created_at DESC
+                    LIMIT {limit}
+                    """,
+                    tuple(params)
+                )
+                for r in cursor.fetchall():
+                    rows.append({
+                        "id": r[0],
+                        "user_name": r[1] or "",
+                        "user_id": r[2],
+                        "session_id": r[3] or "",
+                        "conversation_type": r[4] or "",
+                        "role": r[5] or "",
+                        "content": (r[6] or ""),
+                        "created_at": str(r[7]) if r[7] else ""
+                    })
+
+            else:
+                conn.close()
+                return JSONResponse({"error": "不支援的類型"}, status_code=400)
+
+            conn.close()
+            return {"type": export_type, "count": len(rows), "rows": rows}
+
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     # ===== OAuth 認證功能 =====
     
     @app.get("/api/auth/google")
