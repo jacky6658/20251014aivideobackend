@@ -434,6 +434,120 @@ A: 檢查：
 
 ## 更新日誌
 
+### 2025-11-04 - 長期記憶系統完整支援
+
+#### ✅ 系統狀態確認
+
+**長期記憶 API 端點**（已完整實現）：
+- ✅ `POST /api/memory/long-term` - 儲存長期記憶（已實現並正常工作）
+- ✅ `GET /api/memory/long-term` - 獲取用戶長期記憶（支援會話篩選）
+- ✅ `GET /api/memory/sessions` - 獲取用戶會話列表
+
+**管理員長期記憶 API**（已完整實現）：
+- ✅ `GET /api/admin/long-term-memory` - 獲取所有長期記憶記錄（管理員用）
+- ✅ `GET /api/admin/long-term-memory/by-user` - 按用戶分組獲取長期記憶
+- ✅ `GET /api/admin/memory-stats` - 獲取長期記憶統計數據
+
+#### 🔍 前端修復對應
+
+**前端修復內容**（本次更新）：
+- ✅ 修復 mode2（AI 顧問）的長期記憶儲存功能
+- ✅ 修復 mode3（IP 人設規劃）的重複儲存問題
+- ✅ 修復 `index-ai-consultant.html` 的長期記憶儲存功能
+- ✅ 加強日誌輸出和錯誤處理
+
+**後端狀態**：
+- ✅ 所有長期記憶 API 端點已完整實現並正常工作
+- ✅ 資料庫表結構完整（`long_term_memory` 表）
+- ✅ 認證機制正常運作
+- ✅ 會話管理功能完整
+
+#### 📊 長期記憶儲存流程
+
+**儲存流程**：
+```
+1. 前端調用 recordConversationMessage()
+   ↓
+2. 發送 POST /api/memory/long-term
+   ↓
+3. 後端驗證 token 並獲取 user_id
+   ↓
+4. 插入到 long_term_memory 表
+   ↓
+5. 返回成功訊息
+```
+
+**資料庫結構**：
+```sql
+CREATE TABLE long_term_memory (
+    id SERIAL PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    conversation_type TEXT NOT NULL,  -- 'ai_advisor' | 'ip_planning'
+    session_id TEXT NOT NULL,
+    message_role TEXT NOT NULL,       -- 'user' | 'assistant'
+    message_content TEXT NOT NULL,
+    metadata JSONB,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+#### 🎯 支援的對話類型
+
+**mode2（AI 顧問）**：
+- `conversation_type: 'ai_advisor'`
+- 前端已修復，現在會正確儲存長期記憶
+
+**mode3（IP 人設規劃）**：
+- `conversation_type: 'ip_planning'`
+- 前端已修復重複儲存問題
+
+#### 📝 API 使用範例
+
+**儲存長期記憶**：
+```bash
+POST /api/memory/long-term
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "conversation_type": "ai_advisor",
+  "session_id": "ai_advisor_xxx123",
+  "message_role": "user",
+  "message_content": "用戶訊息內容"
+}
+```
+
+**獲取長期記憶**：
+```bash
+GET /api/memory/long-term?conversation_type=ai_advisor&session_id=xxx123
+Authorization: Bearer <token>
+```
+
+**獲取會話列表**：
+```bash
+GET /api/memory/sessions?conversation_type=ai_advisor
+Authorization: Bearer <token>
+```
+
+#### 🎯 測試結果
+
+所有 API 端點已驗證正常：
+- ✅ **儲存長期記憶**：正確儲存用戶和 AI 的對話記錄
+- ✅ **獲取長期記憶**：正確返回用戶的歷史對話
+- ✅ **會話管理**：正確管理會話 ID 和會話列表
+- ✅ **管理員 API**：正確返回所有用戶的長期記憶統計
+- ✅ **認證機制**：正確驗證 token 和用戶權限
+
+#### 📝 重要注意事項
+
+1. **Token 驗證**：所有長期記憶 API 都需要有效的 JWT token
+2. **用戶權限**：用戶只能訪問自己的長期記憶
+3. **管理員權限**：管理員可以查看所有用戶的長期記憶
+4. **會話管理**：前端會自動生成和管理會話 ID
+5. **資料持久化**：長期記憶會永久儲存在資料庫中
+
+---
+
 ### 2025-10-29 - OAuth 登入流程全面優化
 
 #### 🚀 新增功能
