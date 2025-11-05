@@ -341,6 +341,21 @@ def init_database():
         )
     """)
     
+    # 創建 IP 人設規劃結果表
+    execute_sql("""
+        CREATE TABLE IF NOT EXISTS ip_planning_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            result_type TEXT NOT NULL,
+            title TEXT,
+            content TEXT NOT NULL,
+            metadata TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES user_profiles (user_id)
+        )
+    """)
+    
     # 創建購買訂單表（orders）
     execute_sql("""
         CREATE TABLE IF NOT EXISTS orders (
@@ -2049,6 +2064,157 @@ def create_app() -> FastAPI:
                 return JSONResponse({"error": f"儲存失敗: {str(e)}"}, status_code=500)
         
         return JSONResponse({"error": "儲存失敗，請稍後再試"}, status_code=500)
+    
+    @app.post("/api/ip-planning/save")
+    async def save_ip_planning_result(request: Request, current_user_id: Optional[str] = Depends(get_current_user)):
+        """儲存 IP 人設規劃結果（IP Profile、14天規劃、今日腳本）"""
+        try:
+            data = await request.json()
+            user_id = data.get("user_id")
+            result_type = data.get("result_type")  # 'profile', 'plan', 'scripts'
+            title = data.get("title", "")
+            content = data.get("content")
+            metadata = data.get("metadata", {})
+            
+            if not current_user_id or current_user_id != user_id:
+                return JSONResponse({"error": "無權限儲存至此用戶"}, status_code=403)
+            
+            if not user_id or not result_type or not content:
+                return JSONResponse({"error": "缺少必要參數"}, status_code=400)
+            
+            if result_type not in ['profile', 'plan', 'scripts']:
+                return JSONResponse({"error": "無效的結果類型"}, status_code=400)
+            
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 確保 user_profiles 存在該 user_id
+            if use_postgresql:
+                cursor.execute("SELECT user_id FROM user_profiles WHERE user_id = %s", (user_id,))
+            else:
+                cursor.execute("SELECT user_id FROM user_profiles WHERE user_id = ?", (user_id,))
+            profile_exists = cursor.fetchone()
+            
+            if not profile_exists:
+                if use_postgresql:
+                    cursor.execute("""
+                        INSERT INTO user_profiles (user_id, created_at)
+                        VALUES (%s, CURRENT_TIMESTAMP)
+                        ON CONFLICT (user_id) DO NOTHING
+                    """, (user_id,))
+                else:
+                    cursor.execute("""
+                        INSERT OR IGNORE INTO user_profiles (user_id, created_at)
+                        VALUES (?, CURRENT_TIMESTAMP)
+                    """, (user_id,))
+                conn.commit()
+            
+            # 插入結果記錄
+            if use_postgresql:
+                cursor.execute("""
+                    INSERT INTO ip_planning_results (user_id, result_type, title, content, metadata)
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id
+                """, (
+                    user_id,
+                    result_type,
+                    title,
+                    content,
+                    json.dumps(metadata)
+                ))
+                result_id = cursor.fetchone()[0]
+            else:
+                cursor.execute("""
+                    INSERT INTO ip_planning_results (user_id, result_type, title, content, metadata)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    user_id,
+                    result_type,
+                    title,
+                    content,
+                    json.dumps(metadata)
+                ))
+                conn.commit()
+                result_id = cursor.lastrowid
+            
+            conn.close()
+            
+            return {
+                "success": True,
+                "result_id": result_id,
+                "message": "結果儲存成功"
+            }
+        except Exception as e:
+            return JSONResponse({"error": f"儲存失敗: {str(e)}"}, status_code=500)
+    
+    @app.get("/api/ip-planning/my")
+    async def get_my_ip_planning_results(current_user_id: Optional[str] = Depends(get_current_user), result_type: Optional[str] = None):
+        """獲取用戶的 IP 人設規劃結果列表"""
+        if not current_user_id:
+            return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if result_type:
+                # 獲取特定類型的結果
+                if use_postgresql:
+                    cursor.execute("""
+                        SELECT id, result_type, title, content, metadata, created_at, updated_at
+                        FROM ip_planning_results
+                        WHERE user_id = %s AND result_type = %s
+                        ORDER BY created_at DESC
+                    """, (current_user_id, result_type))
+                else:
+                    cursor.execute("""
+                        SELECT id, result_type, title, content, metadata, created_at, updated_at
+                        FROM ip_planning_results
+                        WHERE user_id = ? AND result_type = ?
+                        ORDER BY created_at DESC
+                    """, (current_user_id, result_type))
+            else:
+                # 獲取所有結果
+                if use_postgresql:
+                    cursor.execute("""
+                        SELECT id, result_type, title, content, metadata, created_at, updated_at
+                        FROM ip_planning_results
+                        WHERE user_id = %s
+                        ORDER BY created_at DESC
+                    """, (current_user_id,))
+                else:
+                    cursor.execute("""
+                        SELECT id, result_type, title, content, metadata, created_at, updated_at
+                        FROM ip_planning_results
+                        WHERE user_id = ?
+                        ORDER BY created_at DESC
+                    """, (current_user_id,))
+            
+            results = cursor.fetchall()
+            conn.close()
+            
+            # 格式化結果
+            formatted_results = []
+            for row in results:
+                formatted_results.append({
+                    "id": row[0],
+                    "result_type": row[1],
+                    "title": row[2] or "",
+                    "content": row[3],
+                    "metadata": json.loads(row[4]) if row[4] else {},
+                    "created_at": row[5].isoformat() if row[5] else None,
+                    "updated_at": row[6].isoformat() if row[6] else None
+                })
+            
+            return {"success": True, "results": formatted_results}
+        except Exception as e:
+            return JSONResponse({"error": f"獲取失敗: {str(e)}"}, status_code=500)
     
     @app.get("/api/scripts/my")
     async def get_my_scripts(current_user_id: Optional[str] = Depends(get_current_user)):
@@ -3930,6 +4096,78 @@ def create_app() -> FastAPI:
             conn.close()
             
             return {"success": True, "message": "腳本已刪除"}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.get("/api/admin/ip-planning")
+    async def get_all_ip_planning_results(admin_user: str = Depends(get_admin_user), result_type: Optional[str] = None):
+        """獲取所有 IP 人設規劃結果（管理員用）"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if result_type:
+                # 獲取特定類型的結果
+                if use_postgresql:
+                    cursor.execute("""
+                        SELECT ipr.id, ipr.user_id, ipr.result_type, ipr.title, ipr.content, 
+                               ipr.created_at, ipr.updated_at, ua.name, ua.email
+                        FROM ip_planning_results ipr
+                        LEFT JOIN user_auth ua ON ipr.user_id = ua.user_id
+                        WHERE ipr.result_type = %s
+                        ORDER BY ipr.created_at DESC
+                        LIMIT 100
+                    """, (result_type,))
+                else:
+                    cursor.execute("""
+                        SELECT ipr.id, ipr.user_id, ipr.result_type, ipr.title, ipr.content, 
+                               ipr.created_at, ipr.updated_at, ua.name, ua.email
+                        FROM ip_planning_results ipr
+                        LEFT JOIN user_auth ua ON ipr.user_id = ua.user_id
+                        WHERE ipr.result_type = ?
+                        ORDER BY ipr.created_at DESC
+                        LIMIT 100
+                    """, (result_type,))
+            else:
+                # 獲取所有結果
+                if use_postgresql:
+                    cursor.execute("""
+                        SELECT ipr.id, ipr.user_id, ipr.result_type, ipr.title, ipr.content, 
+                               ipr.created_at, ipr.updated_at, ua.name, ua.email
+                        FROM ip_planning_results ipr
+                        LEFT JOIN user_auth ua ON ipr.user_id = ua.user_id
+                        ORDER BY ipr.created_at DESC
+                        LIMIT 100
+                    """)
+                else:
+                    cursor.execute("""
+                        SELECT ipr.id, ipr.user_id, ipr.result_type, ipr.title, ipr.content, 
+                               ipr.created_at, ipr.updated_at, ua.name, ua.email
+                        FROM ip_planning_results ipr
+                        LEFT JOIN user_auth ua ON ipr.user_id = ua.user_id
+                        ORDER BY ipr.created_at DESC
+                        LIMIT 100
+                    """)
+            
+            results = []
+            for row in cursor.fetchall():
+                results.append({
+                    "id": row[0],
+                    "user_id": row[1],
+                    "result_type": row[2],
+                    "title": row[3] or "",
+                    "content": row[4] or "",
+                    "created_at": row[5],
+                    "updated_at": row[6],
+                    "user_name": row[7] or "未知用戶",
+                    "user_email": row[8] or ""
+                })
+            
+            conn.close()
+            return {"results": results}
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
     
