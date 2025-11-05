@@ -695,7 +695,7 @@ async def get_admin_user(credentials: HTTPAuthorizationCredentials = Depends(sec
     admin_ids = os.getenv("ADMIN_USER_IDS", "").split(",")
     admin_ids = [x.strip() for x in admin_ids if x.strip()]
     if user_id in admin_ids:
-    return user_id
+        return user_id
     
     # 方式 2: 檢查 email 是否在白名單中
     admin_emails = os.getenv("ADMIN_EMAILS", "").split(",")
@@ -2991,12 +2991,17 @@ def create_app() -> FastAPI:
             is_subscribed = data.get("is_subscribed", 0)
             # 可選：設定訂閱期限（天數），預設為 30 天（1個月）
             subscription_days = data.get("subscription_days", 30)
+            # 可選：管理員備註
+            admin_note = data.get("admin_note", "")
             
             conn = get_db_connection()
             cursor = conn.cursor()
             
             database_url = os.getenv("DATABASE_URL")
             use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 初始化變數
+            expires_dt = None
             
             if is_subscribed:
                 # 啟用訂閱：更新 user_auth 並在 licenses 表中創建/更新記錄
@@ -3012,16 +3017,22 @@ def create_app() -> FastAPI:
                     """, (user_id,))
                     
                     # 更新/建立 licenses 記錄
+                    # 準備 features_json（包含管理員備註）
+                    features_json = None
+                    if admin_note:
+                        features_json = json.dumps({"admin_note": admin_note, "admin_user": admin_user})
+                    
                     try:
                         cursor.execute("""
-                            INSERT INTO licenses (user_id, tier, seats, expires_at, status, source, updated_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                            INSERT INTO licenses (user_id, tier, seats, expires_at, status, source, features_json, updated_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                             ON CONFLICT (user_id)
                             DO UPDATE SET
                                 expires_at = EXCLUDED.expires_at,
                                 status = EXCLUDED.status,
+                                features_json = EXCLUDED.features_json,
                                 updated_at = CURRENT_TIMESTAMP
-                        """, (user_id, "personal", 1, expires_dt, "active", "admin_manual"))
+                        """, (user_id, "personal", 1, expires_dt, "active", "admin_manual", features_json))
                     except Exception as e:
                         print(f"WARN: 更新 licenses 表失敗: {e}")
                 else:
@@ -3032,12 +3043,17 @@ def create_app() -> FastAPI:
                     """, (user_id,))
                     
                     # 更新/建立 licenses 記錄
+                    # 準備 features_json（包含管理員備註）
+                    features_json = None
+                    if admin_note:
+                        features_json = json.dumps({"admin_note": admin_note, "admin_user": admin_user})
+                    
                     try:
                         cursor.execute("""
                             INSERT OR REPLACE INTO licenses
-                            (user_id, tier, seats, expires_at, status, source, updated_at)
-                            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                        """, (user_id, "personal", 1, expires_dt.timestamp(), "active", "admin_manual"))
+                            (user_id, tier, seats, expires_at, status, source, features_json, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        """, (user_id, "personal", 1, expires_dt.timestamp(), "active", "admin_manual", features_json))
                     except Exception as e:
                         print(f"WARN: 更新 licenses 表失敗: {e}")
             else:
