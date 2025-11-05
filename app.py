@@ -4116,7 +4116,7 @@ def create_app() -> FastAPI:
         return {"auth_url": auth_url}
 
     @app.get("/api/auth/google/callback")
-    async def google_callback_get(code: str = None, state: Optional[str] = None):
+    async def google_callback_get(code: str = None, state: Optional[str] = None, redirect_uri: Optional[str] = None):
         """處理 Google OAuth 回調（GET 請求 - 來自 Google 重定向）"""
         try:
             # 除錯資訊
@@ -4273,15 +4273,15 @@ def create_app() -> FastAPI:
                         )
                     else:
                         # 生產環境：Redirect 到前端的 popup-callback.html 頁面
-                # 該頁面會使用 postMessage 傳遞 token 給主視窗並自動關閉
-                callback_url = (
-                    f"{frontend_base}/auth/popup-callback.html"
-                    f"?token={safe_token}"
-                    f"&user_id={safe_user_id}"
-                    f"&email={safe_email}"
-                    f"&name={safe_name}"
-                    f"&picture={safe_picture}"
-                )
+                        # 該頁面會使用 postMessage 傳遞 token 給主視窗並自動關閉
+                        callback_url = (
+                            f"{frontend_base}/auth/popup-callback.html"
+                            f"?token={safe_token}"
+                            f"&user_id={safe_user_id}"
+                            f"&email={safe_email}"
+                            f"&name={safe_name}"
+                            f"&picture={safe_picture}"
+                        )
                 
                 print(f"DEBUG: Redirecting to callback URL: {callback_url}")
                 
