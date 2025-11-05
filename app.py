@@ -3556,12 +3556,20 @@ def create_app() -> FastAPI:
             if profile_result and profile_result[0]:
                 mode_stats["mode3_ip_planning"]["profiles_generated"] = profile_result[0]
             
-            # 獲取時間分布
+            # 獲取各模式的時間分布（分別統計）
+            time_distribution = {
+                "mode1": {"00:00-06:00": 0, "06:00-12:00": 0, "12:00-18:00": 0, "18:00-24:00": 0},
+                "mode2": {"00:00-06:00": 0, "06:00-12:00": 0, "12:00-18:00": 0, "18:00-24:00": 0},
+                "mode3": {"00:00-06:00": 0, "06:00-12:00": 0, "12:00-18:00": 0, "18:00-24:00": 0}
+            }
+            
+            # 統計 Mode1（一鍵生成）的時間分布
             if use_postgresql:
                 cursor.execute("""
                     SELECT DATE_TRUNC('hour', created_at) as hour, COUNT(*) as count
                     FROM conversation_summaries
-                    WHERE created_at >= CURRENT_TIMESTAMP - INTERVAL '30 days'
+                    WHERE conversation_type = 'account_positioning'
+                    AND created_at >= CURRENT_TIMESTAMP - INTERVAL '30 days'
                     GROUP BY hour
                     ORDER BY hour
                 """)
@@ -3569,19 +3577,17 @@ def create_app() -> FastAPI:
                 cursor.execute("""
                     SELECT strftime('%H', created_at) as hour, COUNT(*) as count
                     FROM conversation_summaries
-                    WHERE created_at >= datetime('now', '-30 days')
+                    WHERE conversation_type = 'account_positioning'
+                    AND created_at >= datetime('now', '-30 days')
                     GROUP BY hour
                     ORDER BY hour
                 """)
             
-            time_stats = {"00:00-06:00": 0, "06:00-12:00": 0, "12:00-18:00": 0, "18:00-24:00": 0}
             for row in cursor.fetchall():
                 try:
                     if use_postgresql:
-                        # PostgreSQL 返回 datetime 對象
                         hour_str = row[0].strftime('%H')
                     else:
-                        # SQLite 返回字符串 'HH' 格式
                         hour_str = str(row[0])[:2]
                     hour = int(hour_str)
                 except:
@@ -3589,19 +3595,99 @@ def create_app() -> FastAPI:
                 
                 count = row[1]
                 if 0 <= hour < 6:
-                    time_stats["00:00-06:00"] += count
+                    time_distribution["mode1"]["00:00-06:00"] += count
                 elif 6 <= hour < 12:
-                    time_stats["06:00-12:00"] += count
+                    time_distribution["mode1"]["06:00-12:00"] += count
                 elif 12 <= hour < 18:
-                    time_stats["12:00-18:00"] += count
+                    time_distribution["mode1"]["12:00-18:00"] += count
                 else:
-                    time_stats["18:00-24:00"] += count
+                    time_distribution["mode1"]["18:00-24:00"] += count
+            
+            # 統計 Mode2（AI顧問）的時間分布
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT DATE_TRUNC('hour', created_at) as hour, COUNT(*) as count
+                    FROM conversation_summaries
+                    WHERE conversation_type IN ('topic_selection', 'script_generation', 'general_consultation')
+                    AND created_at >= CURRENT_TIMESTAMP - INTERVAL '30 days'
+                    GROUP BY hour
+                    ORDER BY hour
+                """)
+            else:
+                cursor.execute("""
+                    SELECT strftime('%H', created_at) as hour, COUNT(*) as count
+                    FROM conversation_summaries
+                    WHERE conversation_type IN ('topic_selection', 'script_generation', 'general_consultation')
+                    AND created_at >= datetime('now', '-30 days')
+                    GROUP BY hour
+                    ORDER BY hour
+                """)
+            
+            for row in cursor.fetchall():
+                try:
+                    if use_postgresql:
+                        hour_str = row[0].strftime('%H')
+                    else:
+                        hour_str = str(row[0])[:2]
+                    hour = int(hour_str)
+                except:
+                    hour = 0
+                
+                count = row[1]
+                if 0 <= hour < 6:
+                    time_distribution["mode2"]["00:00-06:00"] += count
+                elif 6 <= hour < 12:
+                    time_distribution["mode2"]["06:00-12:00"] += count
+                elif 12 <= hour < 18:
+                    time_distribution["mode2"]["12:00-18:00"] += count
+                else:
+                    time_distribution["mode2"]["18:00-24:00"] += count
+            
+            # 統計 Mode3（IP人設規劃）的時間分布（從 long_term_memory 表）
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT DATE_TRUNC('hour', created_at) as hour, COUNT(DISTINCT session_id) as count
+                    FROM long_term_memory
+                    WHERE conversation_type = 'ip_planning'
+                    AND created_at >= CURRENT_TIMESTAMP - INTERVAL '30 days'
+                    GROUP BY hour
+                    ORDER BY hour
+                """)
+            else:
+                cursor.execute("""
+                    SELECT strftime('%H', created_at) as hour, COUNT(DISTINCT session_id) as count
+                    FROM long_term_memory
+                    WHERE conversation_type = 'ip_planning'
+                    AND created_at >= datetime('now', '-30 days')
+                    GROUP BY hour
+                    ORDER BY hour
+                """)
+            
+            for row in cursor.fetchall():
+                try:
+                    if use_postgresql:
+                        hour_str = row[0].strftime('%H')
+                    else:
+                        hour_str = str(row[0])[:2]
+                    hour = int(hour_str)
+                except:
+                    hour = 0
+                
+                count = row[1]
+                if 0 <= hour < 6:
+                    time_distribution["mode3"]["00:00-06:00"] += count
+                elif 6 <= hour < 12:
+                    time_distribution["mode3"]["06:00-12:00"] += count
+                elif 12 <= hour < 18:
+                    time_distribution["mode3"]["12:00-18:00"] += count
+                else:
+                    time_distribution["mode3"]["18:00-24:00"] += count
             
             conn.close()
             
             return {
                 "mode_stats": mode_stats,
-                "time_distribution": time_stats
+                "time_distribution": time_distribution
             }
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
