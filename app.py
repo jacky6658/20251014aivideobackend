@@ -4252,9 +4252,253 @@ def create_app() -> FastAPI:
                     headers={"Content-Disposition": "attachment; filename=generations.csv"}
                 )
             
+            elif export_type == "orders":
+                database_url = os.getenv("DATABASE_URL")
+                use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+                
+                if use_postgresql:
+                    cursor.execute("""
+                        SELECT o.id, ua.name, ua.email, o.amount, o.status, o.payment_method, o.created_at, o.updated_at
+                        FROM orders o
+                        LEFT JOIN user_auth ua ON o.user_id = ua.user_id
+                        ORDER BY o.created_at DESC
+                    """)
+                else:
+                    cursor.execute("""
+                        SELECT o.id, ua.name, ua.email, o.amount, o.status, o.payment_method, o.created_at, o.updated_at
+                        FROM orders o
+                        LEFT JOIN user_auth ua ON o.user_id = ua.user_id
+                        ORDER BY o.created_at DESC
+                    """)
+                
+                output = io.StringIO()
+                writer = csv.writer(output)
+                writer.writerow(['訂單ID', '用戶名稱', 'Email', '金額', '狀態', '支付方式', '創建時間', '更新時間'])
+                for row in cursor.fetchall():
+                    writer.writerow(row)
+                output.seek(0)
+                
+                return Response(
+                    content=output.getvalue(),
+                    media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=orders.csv"}
+                )
+            
+            elif export_type == "long-term-memory":
+                database_url = os.getenv("DATABASE_URL")
+                use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+                
+                if use_postgresql:
+                    cursor.execute("""
+                        SELECT ltm.id, ua.name, ltm.user_id, ltm.session_id, ltm.conversation_type, 
+                               ltm.role, ltm.content, ltm.created_at
+                        FROM long_term_memory ltm
+                        LEFT JOIN user_auth ua ON ltm.user_id = ua.user_id
+                        ORDER BY ltm.created_at DESC
+                        LIMIT 10000
+                    """)
+                else:
+                    cursor.execute("""
+                        SELECT ltm.id, ua.name, ltm.user_id, ltm.session_id, ltm.conversation_type, 
+                               ltm.role, ltm.content, ltm.created_at
+                        FROM long_term_memory ltm
+                        LEFT JOIN user_auth ua ON ltm.user_id = ua.user_id
+                        ORDER BY ltm.created_at DESC
+                        LIMIT 10000
+                    """)
+                
+                output = io.StringIO()
+                writer = csv.writer(output)
+                writer.writerow(['ID', '用戶名稱', '用戶ID', '會話ID', '對話類型', '角色', '內容', '創建時間'])
+                for row in cursor.fetchall():
+                    # 處理內容可能很長的情況
+                    content = str(row[6]) if row[6] else ""
+                    if len(content) > 1000:
+                        content = content[:1000] + "..."
+                    row_list = list(row[:6]) + [content] + [row[7]]
+                    writer.writerow(row_list)
+                output.seek(0)
+                
+                return Response(
+                    content=output.getvalue(),
+                    media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=long-term-memory.csv"}
+                )
+            
             else:
                 return JSONResponse({"error": "無效的匯出類型"}, status_code=400)
         
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.post("/api/admin/import/{import_type}")
+    async def import_csv(import_type: str, request: Request, admin_user: str = Depends(get_admin_user)):
+        """匯入 CSV 檔案"""
+        import csv
+        import io
+        
+        try:
+            # 獲取上傳的檔案
+            form_data = await request.form()
+            file = form_data.get("file")
+            mode = form_data.get("mode", "add")  # add 或 replace
+            
+            if not file:
+                return JSONResponse({"error": "未提供檔案"}, status_code=400)
+            
+            # 讀取檔案內容
+            file_content = await file.read()
+            content_str = file_content.decode('utf-8-sig')  # 處理 BOM
+            csv_reader = csv.DictReader(io.StringIO(content_str))
+            
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            success_count = 0
+            error_count = 0
+            errors = []
+            
+            if import_type == "users":
+                # 匯入用戶資料
+                for row in csv_reader:
+                    try:
+                        user_id = row.get('用戶ID', '').strip()
+                        name = row.get('姓名', '').strip()
+                        email = row.get('Email', '').strip()
+                        is_subscribed = row.get('是否訂閱', '0').strip()
+                        
+                        if not user_id or not email:
+                            error_count += 1
+                            errors.append(f"缺少必要欄位：用戶ID或Email")
+                            continue
+                        
+                        is_subscribed_int = 1 if str(is_subscribed).lower() in ['1', 'true', 'yes', '已訂閱'] else 0
+                        
+                        if use_postgresql:
+                            # 檢查用戶是否存在
+                            cursor.execute("SELECT user_id FROM user_auth WHERE user_id = %s", (user_id,))
+                            exists = cursor.fetchone()
+                            
+                            if exists and mode == "replace":
+                                # 更新現有用戶
+                                cursor.execute("""
+                                    UPDATE user_auth 
+                                    SET name = %s, email = %s, is_subscribed = %s, updated_at = CURRENT_TIMESTAMP
+                                    WHERE user_id = %s
+                                """, (name, email, is_subscribed_int, user_id))
+                            elif not exists:
+                                # 新增用戶
+                                cursor.execute("""
+                                    INSERT INTO user_auth (user_id, name, email, is_subscribed, created_at, updated_at)
+                                    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                                """, (user_id, name, email, is_subscribed_int))
+                            # 如果存在且 mode == "add"，則跳過
+                        else:
+                            cursor.execute("SELECT user_id FROM user_auth WHERE user_id = ?", (user_id,))
+                            exists = cursor.fetchone()
+                            
+                            if exists and mode == "replace":
+                                cursor.execute("""
+                                    UPDATE user_auth 
+                                    SET name = ?, email = ?, is_subscribed = ?, updated_at = CURRENT_TIMESTAMP
+                                    WHERE user_id = ?
+                                """, (name, email, is_subscribed_int, user_id))
+                            elif not exists:
+                                cursor.execute("""
+                                    INSERT INTO user_auth (user_id, name, email, is_subscribed, created_at, updated_at)
+                                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                                """, (user_id, name, email, is_subscribed_int))
+                        
+                        success_count += 1
+                    except Exception as e:
+                        error_count += 1
+                        errors.append(f"處理用戶 {row.get('用戶ID', '未知')} 時出錯：{str(e)}")
+            
+            elif import_type == "scripts":
+                # 匯入腳本資料
+                for row in csv_reader:
+                    try:
+                        user_id = row.get('用戶ID', '').strip()
+                        script_name = row.get('腳本名稱', row.get('標題', '')).strip()
+                        title = row.get('標題', script_name).strip()
+                        content = row.get('內容', '').strip()
+                        platform = row.get('平台', '').strip()
+                        topic = row.get('主題', '').strip()
+                        
+                        if not user_id or not content:
+                            error_count += 1
+                            errors.append(f"缺少必要欄位：用戶ID或內容")
+                            continue
+                        
+                        if use_postgresql:
+                            cursor.execute("""
+                                INSERT INTO user_scripts (user_id, script_name, title, content, platform, topic, created_at)
+                                VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                            """, (user_id, script_name, title, content, platform, topic))
+                        else:
+                            cursor.execute("""
+                                INSERT INTO user_scripts (user_id, script_name, title, content, platform, topic, created_at)
+                                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                            """, (user_id, script_name, title, content, platform, topic))
+                        
+                        success_count += 1
+                    except Exception as e:
+                        error_count += 1
+                        errors.append(f"處理腳本時出錯：{str(e)}")
+            
+            elif import_type == "orders":
+                # 匯入訂單資料
+                for row in csv_reader:
+                    try:
+                        user_id = row.get('用戶ID', '').strip()
+                        amount = row.get('金額', '0').strip()
+                        status = row.get('狀態', 'pending').strip()
+                        payment_method = row.get('支付方式', '').strip()
+                        
+                        if not user_id:
+                            error_count += 1
+                            errors.append(f"缺少必要欄位：用戶ID")
+                            continue
+                        
+                        try:
+                            amount_float = float(amount)
+                        except:
+                            amount_float = 0.0
+                        
+                        if use_postgresql:
+                            cursor.execute("""
+                                INSERT INTO orders (user_id, amount, status, payment_method, created_at, updated_at)
+                                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                            """, (user_id, amount_float, status, payment_method))
+                        else:
+                            cursor.execute("""
+                                INSERT INTO orders (user_id, amount, status, payment_method, created_at, updated_at)
+                                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                            """, (user_id, amount_float, status, payment_method))
+                        
+                        success_count += 1
+                    except Exception as e:
+                        error_count += 1
+                        errors.append(f"處理訂單時出錯：{str(e)}")
+            
+            else:
+                conn.close()
+                return JSONResponse({"error": "不支援的匯入類型"}, status_code=400)
+            
+            if not use_postgresql:
+                conn.commit()
+            conn.close()
+            
+            return {
+                "success": True,
+                "success_count": success_count,
+                "error_count": error_count,
+                "errors": errors[:10]  # 只返回前10個錯誤
+            }
+            
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
