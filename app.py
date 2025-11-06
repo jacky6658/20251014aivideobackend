@@ -7091,12 +7091,13 @@ def create_app() -> FastAPI:
                 conn.close()
                 return JSONResponse({"error": "儲存授權記錄失敗"}, status_code=500)
             
-            # 生成授權連結
+            # 生成授權連結（使用根路徑，避免 404 錯誤）
             frontend_url = os.getenv("FRONTEND_URL", "https://aivideonew.zeabur.app")
             # 確保 frontend_url 包含協議（https://）
             if not frontend_url.startswith("http://") and not frontend_url.startswith("https://"):
                 frontend_url = f"https://{frontend_url}"
-            activation_link = f"{frontend_url}/activate?token={activation_token}"
+            # 使用根路徑 ?token=xxx，前端已支援此格式
+            activation_link = f"{frontend_url}/?token={activation_token}"
             
             logger.info(f"授權記錄建立成功: channel={channel}, order_id={order_id}, email={email}, plan_type={plan_type}")
             
