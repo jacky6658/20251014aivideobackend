@@ -1359,23 +1359,23 @@ def generate_access_token(user_id: str) -> str:
     """生成訪問令牌（使用標準 PyJWT 庫）"""
     if JWT_AVAILABLE:
         # 使用標準 PyJWT 庫
-    payload = {
-        "user_id": user_id,
-        "exp": get_taiwan_time().timestamp() + 86400  # 24小時過期
-    }
-        return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
-    else:
-        # 回退到舊的實現（不建議，但保持向後兼容）
         payload = {
             "user_id": user_id,
             "exp": get_taiwan_time().timestamp() + 86400  # 24小時過期
         }
-    import json
-    header = {"alg": "HS256", "typ": "JWT"}
-    encoded_header = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip('=')
-    encoded_payload = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip('=')
-    signature = hashlib.sha256(f"{encoded_header}.{encoded_payload}.{JWT_SECRET}".encode()).hexdigest()
-    return f"{encoded_header}.{encoded_payload}.{signature}"
+        return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+    else:
+        # 回退到舊的實現（不建議，但保持向後兼容）
+        import json
+        payload = {
+            "user_id": user_id,
+            "exp": get_taiwan_time().timestamp() + 86400  # 24小時過期
+        }
+        header = {"alg": "HS256", "typ": "JWT"}
+        encoded_header = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip('=')
+        encoded_payload = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip('=')
+        signature = hashlib.sha256(f"{encoded_header}.{encoded_payload}.{JWT_SECRET}".encode()).hexdigest()
+        return f"{encoded_header}.{encoded_payload}.{signature}"
 
 
 def verify_access_token(token: str, allow_expired: bool = False) -> Optional[str]:
@@ -1405,16 +1405,16 @@ def verify_access_token(token: str, allow_expired: bool = False) -> Optional[str
     else:
         # 回退到舊的實現（不建議，但保持向後兼容）
         try:
-        import json
-        parts = token.split('.')
-        if len(parts) != 3:
-            return None
-        
-        # 驗證簽名
-        expected_signature = hashlib.sha256(f"{parts[0]}.{parts[1]}.{JWT_SECRET}".encode()).hexdigest()
-        if expected_signature != parts[2]:
-            return None
-        
+            import json
+            parts = token.split('.')
+            if len(parts) != 3:
+                return None
+            
+            # 驗證簽名
+            expected_signature = hashlib.sha256(f"{parts[0]}.{parts[1]}.{JWT_SECRET}".encode()).hexdigest()
+            if expected_signature != parts[2]:
+                return None
+            
             # 解碼 payload（處理 base64 填充）
             payload_str = parts[1]
             # 添加必要的填充
@@ -1423,17 +1423,17 @@ def verify_access_token(token: str, allow_expired: bool = False) -> Optional[str
                 payload_str += '=' * padding
             
             payload = json.loads(base64.urlsafe_b64decode(payload_str).decode())
-        
-        # 檢查過期時間（如果 allow_expired=False）
-        if not allow_expired:
-            exp = payload.get("exp", 0)
-            now = get_taiwan_time().timestamp()
-            if exp < now:
-            return None
-        
+            
+            # 檢查過期時間（如果 allow_expired=False）
+            if not allow_expired:
+                exp = payload.get("exp", 0)
+                now = get_taiwan_time().timestamp()
+                if exp < now:
+                    return None
+            
             return payload.get("user_id")
-    except Exception as e:
-        return None
+        except Exception as e:
+            return None
 
 
 async def get_google_user_info(access_token: str) -> Optional[GoogleUser]:
@@ -1500,7 +1500,7 @@ async def get_admin_user(credentials: HTTPAuthorizationCredentials = Depends(sec
     admin_ids = os.getenv("ADMIN_USER_IDS", "").split(",")
     admin_ids = [x.strip() for x in admin_ids if x.strip()]
     if user_id in admin_ids:
-    return user_id
+        return user_id
     
     # 方式 2: 檢查 email 是否在白名單中
     admin_emails = os.getenv("ADMIN_EMAILS", "").split(",")
@@ -2112,7 +2112,7 @@ def create_app() -> FastAPI:
             if not parsed.netloc or parsed.netloc.count('.') < 1:
                 print(f"WARNING: FRONTEND_URL 格式錯誤: {frontend_url}")
             else:
-        cors_origins.append(frontend_url)
+                cors_origins.append(frontend_url)
     
     app.add_middleware(
         CORSMiddleware,
@@ -4052,12 +4052,12 @@ def create_app() -> FastAPI:
                 expires_dt = get_taiwan_time() + timedelta(days=subscription_days)
                 
                 # 更新 user_auth 訂閱狀態
-            if use_postgresql:
-                cursor.execute("""
-                    UPDATE user_auth 
-                            SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP
-                    WHERE user_id = %s
-                        """, (user_id,))
+                if use_postgresql:
+                    cursor.execute("""
+                        UPDATE user_auth 
+                        SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP
+                        WHERE user_id = %s
+                    """, (user_id,))
                     
                     # 更新/建立 licenses 記錄
                     # 準備 features_json（包含管理員備註）
@@ -4078,12 +4078,12 @@ def create_app() -> FastAPI:
                         """, (user_id, "personal", 1, expires_dt, "active", "admin_manual", features_json))
                     except Exception as e:
                         print(f"WARN: 更新 licenses 表失敗: {e}")
-            else:
-                cursor.execute("""
-                    UPDATE user_auth 
-                            SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP
-                    WHERE user_id = ?
-                        """, (user_id,))
+                else:
+                    cursor.execute("""
+                        UPDATE user_auth 
+                        SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP
+                        WHERE user_id = ?
+                    """, (user_id,))
                     
                     # 更新/建立 licenses 記錄
                     # 準備 features_json（包含管理員備註）
@@ -6378,22 +6378,22 @@ def create_app() -> FastAPI:
                         )
                     else:
                         # 生產環境：Redirect 到前端的 popup-callback.html 頁面
-                # 該頁面會使用 postMessage 傳遞 token 給主視窗並自動關閉
-                callback_url = (
-                    f"{frontend_base}/auth/popup-callback.html"
-                    f"?token={safe_token}"
-                    f"&user_id={safe_user_id}"
-                    f"&email={safe_email}"
-                    f"&name={safe_name}"
-                    f"&picture={safe_picture}"
-                )
+                        # 該頁面會使用 postMessage 傳遞 token 給主視窗並自動關閉
+                        callback_url = (
+                            f"{frontend_base}/auth/popup-callback.html"
+                            f"?token={safe_token}"
+                            f"&user_id={safe_user_id}"
+                            f"&email={safe_email}"
+                            f"&name={safe_name}"
+                            f"&picture={safe_picture}"
+                        )
                 
-                print(f"DEBUG: Redirecting to callback URL: {callback_url}")
-                
-                # 設置適當的 HTTP Header 以支援 popup 通信
-                response = RedirectResponse(url=callback_url)
-                response.headers["Cross-Origin-Opener-Policy"] = "same-origin-allow-popups"
-                return response
+                    print(f"DEBUG: Redirecting to callback URL: {callback_url}")
+                    
+                    # 設置適當的 HTTP Header 以支援 popup 通信
+                    response = RedirectResponse(url=callback_url)
+                    response.headers["Cross-Origin-Opener-Policy"] = "same-origin-allow-popups"
+                    return response
                 
         except Exception as e:
             # 處理錯誤訊息以安全地嵌入 JavaScript（先處理再放入 f-string）
