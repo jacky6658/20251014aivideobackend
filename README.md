@@ -241,29 +241,86 @@ AI 短影音智能體後端服務，提供短影音腳本生成和文案創作�
 - 知識庫整合
 
 ## 環境變數設定
+
+### 📋 完整環境變數清單
+
+#### 🔴 必須設定（核心功能）
+
+**AI 模型設定**：
 ```bash
-# AI 模型設定
-GEMINI_API_KEY=your_gemini_api_key
-GEMINI_MODEL=gemini-2.5-flash
-KB_PATH=/app/data/kb.txt
-
-# OAuth 認證設定
-GOOGLE_CLIENT_ID=your_google_client_id
-GOOGLE_CLIENT_SECRET=your_google_client_secret
-OAUTH_REDIRECT_URI=https://aivideobackend.zeabur.app/api/auth/google/callback
-
-# JWT 設定（必須是固定值）
-JWT_SECRET=u5c1N4kQm8Zf2Tg7Pp9Lr3Xw6Yd0Aq2H
-
-# 資料庫設定（可選）
-DATABASE_URL=postgresql://user:password@host:port/dbname  # 如果有 PostgreSQL
-DATABASE_PATH=/persistent  # SQLite 持久化路徑（Zeabur 使用）
+GEMINI_API_KEY=your_gemini_api_key          # Gemini API 金鑰（必須）
+GEMINI_MODEL=gemini-2.5-flash               # 模型名稱（可選，預設 gemini-2.5-flash）
 ```
 
-**重要注意事項**：
-- `JWT_SECRET` 必須是固定值，建議使用提供的值或在 Zeabur 環境變數中設定
-- 如果 `JWT_SECRET` 改變，所有現有的 access token 都會失效
-- `OAUTH_REDIRECT_URI` 必須與 Google Cloud Console 中設定的 redirect URI 完全一致
+**OAuth 認證設定**：
+```bash
+GOOGLE_CLIENT_ID=your_google_client_id      # Google OAuth Client ID（必須）
+GOOGLE_CLIENT_SECRET=your_google_client_secret # Google OAuth Client Secret（必須）
+OAUTH_REDIRECT_URI=https://aivideobackend.zeabur.app/api/auth/google/callback  # OAuth 回調 URI（必須）
+FRONTEND_BASE_URL=https://aivideonew.zeabur.app  # 前端基礎 URL（必須）
+FRONTEND_URL=https://aivideonew.zeabur.app       # 前端 URL（CORS 用，可選）
+```
+
+**JWT 與安全設定**：
+```bash
+JWT_SECRET=your_jwt_secret                   # JWT 簽名密鑰（必須是固定值）
+LLM_KEY_ENCRYPTION_KEY=your_32byte_base64_key # BYOK 加密金鑰（32 字節 base64，必須）
+```
+
+#### 🟡 建議設定（功能增強）
+
+**ECPay 金流設定**（如需金流功能）：
+```bash
+ECPAY_MERCHANT_ID=your_merchant_id          # 商店代號（從 ECPay 後台取得）
+ECPAY_HASH_KEY=your_hash_key                # 金鑰（Hash Key）
+ECPAY_HASH_IV=your_hash_iv                  # 向量（Hash IV）
+ECPAY_API=https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5  # 測試環境
+# ECPAY_API=https://payment.ecpay.com.tw/Cashier/AioCheckOut/V5      # 生產環境
+ECPAY_RETURN_URL=https://aivideonew.zeabur.app/subscription.html      # 用戶返回頁
+ECPAY_NOTIFY_URL=https://aivideobackend.zeabur.app/api/payment/webhook # 伺服器端通知
+```
+
+**n8n 自動匯出設定**（如需自動匯出功能）：
+```bash
+N8N_EXPORT_API_KEY=your_n8n_api_key         # n8n 自動匯出 API 金鑰
+```
+
+#### 🟢 可選設定（進階功能）
+
+**資料庫設定**：
+```bash
+DATABASE_URL=postgresql://user:password@host:port/dbname  # PostgreSQL 連線字串（可選）
+DATABASE_PATH=/persistent                    # SQLite 持久化路徑（Zeabur 使用，可選）
+```
+
+**知識庫設定**：
+```bash
+KB_PATH=/app/data/kb.txt                     # 知識庫檔案路徑（可選）
+```
+
+### ⚠️ 重要注意事項
+
+1. **JWT_SECRET**：
+   - 必須是固定值，建議使用提供的值或在 Zeabur 環境變數中設定
+   - 如果 `JWT_SECRET` 改變，所有現有的 access token 都會失效
+   - 建議值：`u5c1N4kQm8Zf2Tg7Pp9Lr3Xw6Yd0Aq2H`
+
+2. **LLM_KEY_ENCRYPTION_KEY**：
+   - 必須是 32 字節的 base64 編碼字串（Fernet 格式）
+   - 生產環境必須設定，否則 BYOK 功能無法使用
+   - 生成方式：`python3 -c "import secrets; import base64; key = secrets.token_bytes(32); print(base64.urlsafe_b64encode(key).decode())"`
+
+3. **OAUTH_REDIRECT_URI**：
+   - 必須與 Google Cloud Console 中設定的 redirect URI 完全一致
+   - 建議：`https://aivideobackend.zeabur.app/api/auth/google/callback`
+
+4. **ECPay 環境變數**：
+   - 測試環境和生產環境使用不同的 `ECPAY_API` 和 `ECPAY_MERCHANT_ID`
+   - `ECPAY_HASH_KEY` 和 `ECPAY_HASH_IV` 必須從 ECPay 後台取得
+
+5. **FRONTEND_URL**：
+   - 生產環境必須使用 HTTPS
+   - 開發環境允許 localhost（HTTP）
 
 ## 本地開發
 
@@ -433,6 +490,224 @@ A: 檢查：
 3. 後端服務是否正常運行
 
 ## 更新日誌
+
+### 2025-11-06 - 授權連結格式修正（404 錯誤修復）
+
+#### 🐛 問題修復
+- **404 錯誤修復**：修正授權連結格式，從 `/activate?token=xxx` 改為 `/?token=xxx`
+- **原因**：前端是單頁應用（SPA），沒有 `/activate` 路由，導致 404 錯誤
+- **解決方案**：使用根路徑格式，前端已支援 `?token=xxx` 參數處理
+
+#### 🛠️ 技術修改
+**檔案：app.py**
+- 修改 `verify_license_webhook` 函數中的授權連結生成邏輯（約 7094-7100 行）
+- 從 `f"{frontend_url}/activate?token={activation_token}"` 改為 `f"{frontend_url}/?token={activation_token}"`
+
+#### 📝 重要提醒
+- **舊連結格式**：`/activate?token=xxx` 會導致 404 錯誤
+- **新連結格式**：`/?token=xxx` 可以正常使用
+- **建議**：重新生成所有授權連結，使用新格式
+
+---
+
+### 2025-11-06 - 縮排錯誤修復（後端崩潰修復）
+
+#### 🐛 問題修復
+- **IndentationError 修復**：修正多處 Python 縮排錯誤，導致後端無法啟動
+- **影響範圍**：後端服務完全無法啟動，出現 `IndentationError: expected an indented block`
+
+#### 🛠️ 技術修改
+**檔案：app.py**
+- 修正 `generate_access_token` 函數的縮排（約 1358-1378 行）
+- 修正 `verify_access_token` 函數的縮排（約 1405-1436 行）
+- 修正 `get_admin_user` 函數的縮排（約 1502-1503 行）
+- 修正 CORS 設定的縮排（約 2114-2115 行）
+- 修正訂閱狀態更新的縮排（約 4055-4102 行）
+- 修正 callback URL 的縮排（約 6382-6396 行）
+
+#### ✅ 修復結果
+- ✅ 所有語法錯誤已修正
+- ✅ 後端可以正常啟動
+- ✅ 所有功能正常運作
+
+---
+
+### 2025-11-06 - ECPay 金流串接 + 資安強化
+
+#### 💳 ECPay 金流串接
+- **完整實作**: 3 個 ECPay API 端點
+  - `POST /api/payment/checkout` - 建立訂單並返回付款表單
+  - `POST /api/payment/webhook` - 伺服器端通知（含簽章驗證）
+  - `GET /api/payment/return` - 用戶返回頁
+- **簽章功能**: 實作 `gen_check_mac_value()` 和 `verify_ecpay_signature()`
+- **安全措施**: IP 白名單檢查、訂單去重、簽章驗證
+- **環境變數**: 支援 `ECPAY_MERCHANT_ID`、`ECPAY_HASH_KEY`、`ECPAY_HASH_IV` 等
+
+#### 🔒 資安強化
+- **CORS 配置強化**: 嚴格驗證 `FRONTEND_URL` 格式，只允許 HTTPS（開發環境允許 localhost）
+- **安全標頭添加**: HSTS、X-Frame-Options、X-Content-Type-Options、Referrer-Policy
+- **錯誤信息處理優化**: 使用 logging 記錄詳細錯誤，返回通用錯誤給用戶
+- **用戶輸入驗證強化**: 
+  - `validate_api_key()` - API Key 格式驗證
+  - `validate_user_id()` - 用戶 ID 格式驗證
+  - `validate_email()` - Email 格式驗證
+- **Rate Limiting 擴展**: 
+  - `POST /api/generate/positioning` - 10/分鐘
+  - `POST /api/generate/topics` - 10/分鐘
+  - `POST /api/generate/script` - 10/分鐘
+  - `POST /api/chat/stream` - 30/分鐘
+  - `POST /api/admin/auth/login` - 5/分鐘
+  - `GET /api/admin/export/{export_type}` - 10/分鐘
+
+#### 🛠️ 技術修改
+**檔案：app.py**
+
+**1. ECPay 金流配置（約 319-331 行）**：
+```python
+ECPAY_MERCHANT_ID = os.getenv("ECPAY_MERCHANT_ID")
+ECPAY_HASH_KEY = os.getenv("ECPAY_HASH_KEY")
+ECPAY_HASH_IV = os.getenv("ECPAY_HASH_IV")
+ECPAY_API = os.getenv("ECPAY_API", "https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5")
+ECPAY_RETURN_URL = os.getenv("ECPAY_RETURN_URL", "https://aivideonew.zeabur.app/subscription.html")
+ECPAY_NOTIFY_URL = os.getenv("ECPAY_NOTIFY_URL", "https://aivideobackend.zeabur.app/api/payment/webhook")
+```
+
+**2. ECPay 簽章函數（約 794-866 行）**：
+- `gen_check_mac_value()` - 生成簽章
+- `verify_ecpay_signature()` - 驗證簽章
+- `is_ecpay_ip()` - IP 白名單檢查
+
+**3. 輸入驗證函數（約 869-946 行）**：
+- `validate_api_key()` - API Key 格式驗證
+- `validate_user_id()` - 用戶 ID 格式驗證
+- `validate_email()` - Email 格式驗證
+
+**4. ECPay API 端點（約 5859-6209 行）**：
+- `POST /api/payment/checkout` - 建立訂單
+- `POST /api/payment/webhook` - 伺服器端通知
+- `GET /api/payment/return` - 用戶返回頁
+
+**5. CORS 配置強化（約 1579-1606 行）**：
+- 嚴格驗證 `FRONTEND_URL` 格式
+- 只允許 HTTPS（開發環境允許 localhost）
+
+**6. 安全標頭中間件（約 1616-1628 行）**：
+- HSTS、X-Frame-Options、X-Content-Type-Options 等
+
+**7. Rate Limiting 擴展**：
+- 為生成端點、聊天端點、管理端點添加速率限制
+
+#### 📦 環境變數要求
+
+**ECPay 金流（必須設定）**：
+```bash
+ECPAY_MERCHANT_ID=your_merchant_id
+ECPAY_HASH_KEY=your_hash_key
+ECPAY_HASH_IV=your_hash_iv
+ECPAY_API=https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5  # 測試環境
+# ECPAY_API=https://payment.ecpay.com.tw/Cashier/AioCheckOut/V5  # 生產環境
+ECPAY_RETURN_URL=https://aivideonew.zeabur.app/subscription.html
+ECPAY_NOTIFY_URL=https://aivideobackend.zeabur.app/api/payment/webhook
+```
+
+#### ✅ 兼容性保證
+- **前端兼容**: 所有修改都在後端，前端無需修改
+- **向後兼容**: 舊的 `/api/payment/callback` 端點保留（建議移除）
+- **不影響現有功能**: 所有新功能都是新增，不影響現有 API
+
+#### 🔍 測試建議
+1. **ECPay 測試**: 使用測試環境的 Merchant ID 和 Hash Key
+2. **簽章測試**: 確認簽章生成和驗證正確
+3. **Rate Limiting 測試**: 快速發送多個請求，應看到 429 錯誤
+4. **安全標頭測試**: 檢查 HTTP 響應標頭
+
+---
+
+### 2025-11-06 - 多通路授權整合 API
+
+#### 🚀 新增功能
+- **多通路授權整合**：支援 n8n、Portaly、PPA 等外部通路授權
+- **授權連結生成**：自動生成 7 天有效的授權連結
+- **授權驗證 API**：完整的授權驗證和啟用流程
+- **購買記錄整合**：授權成功後自動建立 `orders` 記錄
+
+#### 🛠️ 技術修改
+**檔案：app.py**
+
+**1. 新增 API 端點**：
+- `POST /api/webhook/verify-license` - 接收外部通路授權通知，生成授權連結
+- `GET /api/user/license/verify` - 驗證授權連結並啟用訂閱
+- `GET /api/admin/license-activations` - 管理員查看所有授權記錄
+- `DELETE /api/admin/license-activations/{activation_id}` - 管理員刪除授權記錄
+
+**2. 資料庫表結構**（約 665-683 行）：
+```sql
+CREATE TABLE IF NOT EXISTS license_activations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    activation_token TEXT UNIQUE NOT NULL,
+    channel TEXT NOT NULL,
+    order_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    plan_type TEXT NOT NULL,
+    amount INTEGER NOT NULL,
+    status TEXT DEFAULT 'pending',
+    activated_at TIMESTAMP,
+    activated_by_user_id TEXT,
+    link_expires_at TIMESTAMP,
+    license_expires_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+```
+
+**3. 授權連結生成**（約 7094-7100 行）：
+- 使用根路徑格式：`/?token=xxx`（避免 404 錯誤）
+- 自動添加 `https://` 前綴
+- 7 天有效期限
+
+**4. 授權驗證流程**（約 7117-7303 行）：
+- 驗證 token 有效性
+- 檢查是否已使用或過期
+- 未登入用戶導向登入頁
+- 已登入用戶自動啟用訂閱
+- 自動建立 `orders` 記錄
+
+#### 📊 API 使用範例
+
+**生成授權連結**：
+```bash
+POST /api/webhook/verify-license
+Content-Type: application/json
+
+{
+  "channel": "n8n",
+  "order_id": "ORDER123",
+  "email": "user@example.com",
+  "plan_type": "yearly",
+  "amount": 19900
+}
+```
+
+**回應**：
+```json
+{
+  "status": "success",
+  "activation_token": "xxx",
+  "activation_link": "https://aivideonew.zeabur.app/?token=xxx",
+  "plan_type": "yearly",
+  "license_expires_at": "2026-11-06T10:30:00+08:00",
+  "link_expires_at": "2025-11-13T10:30:00+08:00"
+}
+```
+
+#### ✅ 功能特點
+- ✅ **7 天有效期限**：授權連結 7 天內有效
+- ✅ **一次性使用**：成功使用後立即失效
+- ✅ **自動建立訂單**：授權成功後自動建立 `orders` 記錄
+- ✅ **完整追蹤**：記錄授權來源、用戶、時間等完整資訊
+- ✅ **管理員管理**：後台管理系統可以查看和刪除授權記錄
+
+---
 
 ### 2025-11-06 - 安全漏洞修復（JWT、BYOK、Rate Limiting）
 
