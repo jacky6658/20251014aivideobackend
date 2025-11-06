@@ -590,6 +590,15 @@ def init_database():
             invoice_number TEXT,
             invoice_type TEXT,
             vat_number TEXT,
+            name TEXT,
+            email TEXT,
+            phone TEXT,
+            note TEXT,
+            trade_no TEXT,
+            expire_date TIMESTAMP,
+            payment_code TEXT,
+            bank_code TEXT,
+            raw_payload TEXT,
             raw_data TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -6433,14 +6442,18 @@ def create_app() -> FastAPI:
             try:
                 if use_postgresql:
                     cursor.execute("""
-                        INSERT INTO orders (user_id, order_id, plan_type, amount, payment_status, payment_method, created_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-                    """, (current_user_id, trade_no, plan, amount, "pending", "ecpay"))
+                        INSERT INTO orders (user_id, order_id, plan_type, amount, payment_status, payment_method, 
+                                          invoice_type, vat_number, name, email, phone, note, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    """, (current_user_id, trade_no, plan, amount, "pending", "ecpay", 
+                          invoice_type or None, vat or None, name or None, email or None, phone or None, note or None))
                 else:
                     cursor.execute("""
-                        INSERT INTO orders (user_id, order_id, plan_type, amount, payment_status, payment_method, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    """, (current_user_id, trade_no, plan, amount, "pending", "ecpay"))
+                        INSERT INTO orders (user_id, order_id, plan_type, amount, payment_status, payment_method, 
+                                          invoice_type, vat_number, name, email, phone, note, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """, (current_user_id, trade_no, plan, amount, "pending", "ecpay", 
+                          invoice_type or None, vat or None, name or None, email or None, phone or None, note or None))
                 
                 conn.commit()
             except Exception as e:
@@ -6464,7 +6477,7 @@ def create_app() -> FastAPI:
                 "ItemName": item_name,
                 "ReturnURL": ECPAY_NOTIFY_URL,  # 伺服器端通知
                 "OrderResultURL": f"{ECPAY_RETURN_URL}?order_id={trade_no}",  # 用戶返回頁
-                "ChoosePayment": "Credit",
+                "ChoosePayment": "ALL",  # 讓用戶自行選擇付款方式（信用卡、LINE Pay、Apple Pay、ATM、超商等）
                 "EncryptType": 1,
                 "ClientBackURL": ECPAY_RETURN_URL,  # 取消付款返回頁
             }
@@ -6562,14 +6575,57 @@ def create_app() -> FastAPI:
                 return PlainTextResponse("0|FAIL")
             
             # 獲取訂單資訊
-            trade_no = params.get("MerchantTradeNo", "")
+            merchant_trade_no = params.get("MerchantTradeNo", "")  # 我方訂單號
+            trade_no = params.get("TradeNo", "")  # 綠界交易號
             rtn_code = params.get("RtnCode", "")
             payment_date = params.get("PaymentDate", "")
             trade_amt = params.get("TradeAmt", "")
+            payment_type = params.get("PaymentType", "")  # 付款方式（Credit, ATM, CVS, etc.）
+            
+            # 儲存原始回呼內容（用於稽核）
+            raw_payload_json = json.dumps(params, ensure_ascii=False)
+            
+            # 獲取 ATM/超商相關資訊
+            expire_date = params.get("ExpireDate", "")  # ATM/超商取號有效期限
+            payment_code = params.get("PaymentNo", "") or params.get("Barcode1", "") or params.get("Barcode2", "") or params.get("Barcode3", "")  # CVS 代碼 / ATM 虛擬帳號
+            bank_code = params.get("BankCode", "")  # ATM 銀行代碼
+            
+            # 記錄回呼資訊
+            logger.info(f"ECPay Webhook 回呼: merchant_trade_no={merchant_trade_no}, trade_no={trade_no}, rtn_code={rtn_code}, payment_type={payment_type}")
             
             # 檢查付款狀態
             if str(rtn_code) != "1":
-                print(f"WARNING: ECPay 付款失敗，訂單號: {trade_no}, RtnCode: {rtn_code}")
+                logger.warning(f"ECPay 付款失敗，訂單號: {merchant_trade_no}, RtnCode: {rtn_code}")
+                # 仍然更新訂單狀態為 failed，並儲存原始資料
+                try:
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    database_url = os.getenv("DATABASE_URL")
+                    use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+                    
+                    if use_postgresql:
+                        cursor.execute("""
+                            UPDATE orders 
+                            SET payment_status = %s, 
+                                raw_payload = %s,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE order_id = %s
+                        """, ("failed", raw_payload_json, merchant_trade_no))
+                    else:
+                        cursor.execute("""
+                            UPDATE orders 
+                            SET payment_status = ?, 
+                                raw_payload = ?,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE order_id = ?
+                        """, ("failed", raw_payload_json, merchant_trade_no))
+                    
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+                except Exception as e:
+                    logger.error(f"更新失敗訂單狀態時出錯: {e}")
+                
                 return PlainTextResponse("1|OK")  # 仍然返回 OK，避免 ECPay 重複通知
             
             # 更新訂單狀態
@@ -6580,134 +6636,201 @@ def create_app() -> FastAPI:
             use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
             
             try:
-                # 查詢訂單
+                # 查詢訂單（使用 merchant_trade_no，因為這是我們建立的訂單號）
                 if use_postgresql:
                     cursor.execute(
-                        "SELECT user_id, plan_type, amount FROM orders WHERE order_id = %s",
-                        (trade_no,)
+                        "SELECT user_id, plan_type, amount, payment_status, trade_no FROM orders WHERE order_id = %s",
+                        (merchant_trade_no,)
                     )
                 else:
                     cursor.execute(
-                        "SELECT user_id, plan_type, amount FROM orders WHERE order_id = ?",
-                        (trade_no,)
+                        "SELECT user_id, plan_type, amount, payment_status, trade_no FROM orders WHERE order_id = ?",
+                        (merchant_trade_no,)
                     )
                 
                 order = cursor.fetchone()
                 
                 if not order:
-                    print(f"WARNING: 找不到訂單: {trade_no}")
+                    logger.warning(f"找不到訂單: {merchant_trade_no}")
                     return PlainTextResponse("1|OK")
                 
-                user_id, plan_type, amount = order
+                user_id, plan_type, amount, current_status, existing_trade_no = order
                 
-                # 檢查訂單是否已經處理過（防止重複處理）
-                if use_postgresql:
-                    cursor.execute(
-                        "SELECT payment_status FROM orders WHERE order_id = %s",
-                        (trade_no,)
-                    )
-                else:
-                    cursor.execute(
-                        "SELECT payment_status FROM orders WHERE order_id = ?",
-                        (trade_no,)
-                    )
-                
-                existing_order = cursor.fetchone()
-                if existing_order and existing_order[0] == "paid":
-                    print(f"INFO: 訂單已處理過: {trade_no}")
+                # 冪等處理：檢查是否已經處理過（使用 merchant_trade_no + trade_no）
+                if existing_trade_no and existing_trade_no == trade_no and current_status == "paid":
+                    logger.info(f"訂單已處理過: {merchant_trade_no}, trade_no: {trade_no}")
                     return PlainTextResponse("1|OK")
                 
-                # 計算到期日
-                days = 30 if plan_type == "monthly" else 365
-                expires_dt = get_taiwan_time() + timedelta(days=days)
+                # 判斷付款方式類型
+                is_atm_cvs = payment_type in ("ATM", "CVS", "BARCODE")
+                is_credit_linepay = payment_type in ("Credit", "WebATM") or "LINE" in payment_type.upper() or "APPLE" in payment_type.upper()
                 
-                # 查詢訂單發票資訊
-                if use_postgresql:
-                    cursor.execute(
-                        "SELECT invoice_type, vat_number FROM orders WHERE order_id = %s",
-                        (trade_no,)
-                    )
-                else:
-                    cursor.execute(
-                        "SELECT invoice_type, vat_number FROM orders WHERE order_id = ?",
-                        (trade_no,)
-                    )
+                # 處理 ATM/超商取號（第一次回調）
+                if is_atm_cvs and current_status == "pending":
+                    # 這是取號成功的回調，尚未付款
+                    expire_datetime = None
+                    if expire_date:
+                        try:
+                            # ECPay 的日期格式通常是 "YYYY/MM/DD HH:mm:ss"
+                            expire_datetime = datetime.strptime(expire_date, "%Y/%m/%d %H:%M:%S")
+                        except:
+                            try:
+                                expire_datetime = datetime.strptime(expire_date, "%Y/%m/%d")
+                            except:
+                                logger.warning(f"無法解析有效期限: {expire_date}")
+                    
+                    # 更新訂單：儲存取號資訊，狀態仍為 pending
+                    if use_postgresql:
+                        cursor.execute("""
+                            UPDATE orders 
+                            SET trade_no = %s,
+                                payment_method = %s,
+                                payment_code = %s,
+                                bank_code = %s,
+                                expire_date = %s,
+                                raw_payload = %s,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE order_id = %s
+                        """, (trade_no, payment_type, payment_code or None, bank_code or None, expire_datetime, raw_payload_json, merchant_trade_no))
+                    else:
+                        cursor.execute("""
+                            UPDATE orders 
+                            SET trade_no = ?,
+                                payment_method = ?,
+                                payment_code = ?,
+                                bank_code = ?,
+                                expire_date = ?,
+                                raw_payload = ?,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE order_id = ?
+                        """, (trade_no, payment_type, payment_code or None, bank_code or None, expire_datetime, raw_payload_json, merchant_trade_no))
+                    
+                    conn.commit()
+                    logger.info(f"ATM/超商取號成功，訂單號: {merchant_trade_no}, 付款代碼: {payment_code}")
+                    return PlainTextResponse("1|OK")
                 
-                invoice_info = cursor.fetchone()
-                invoice_type = invoice_info[0] if invoice_info and invoice_info[0] else None
-                vat_number = invoice_info[1] if invoice_info and invoice_info[1] else None
-                
-                # 開立發票（如果啟用）
-                invoice_number = None
-                if ECPAY_INVOICE_ENABLED and invoice_type:
-                    try:
-                        invoice_number = await issue_ecpay_invoice(
-                            trade_no=trade_no,
-                            amount=int(trade_amt),
-                            invoice_type=invoice_type,
-                            vat_number=vat_number,
-                            user_id=user_id
+                # 處理信用卡/LINE Pay/Apple Pay 或 ATM/超商付款完成
+                if is_credit_linepay or (is_atm_cvs and current_status == "pending" and rtn_code == "1"):
+                    # 這是付款完成的回調
+                    
+                    # 計算到期日
+                    days = 30 if plan_type == "monthly" else 365
+                    expires_dt = get_taiwan_time() + timedelta(days=days)
+                    
+                    # 查詢訂單發票資訊
+                    if use_postgresql:
+                        cursor.execute(
+                            "SELECT invoice_type, vat_number FROM orders WHERE order_id = %s",
+                            (merchant_trade_no,)
                         )
-                        if invoice_number:
-                            logger.info(f"發票開立成功，訂單號: {trade_no}, 發票號: {invoice_number}")
-                        else:
-                            logger.warning(f"發票開立失敗，訂單號: {trade_no}")
-                    except Exception as e:
-                        logger.error(f"發票開立異常，訂單號: {trade_no}, 錯誤: {e}")
+                    else:
+                        cursor.execute(
+                            "SELECT invoice_type, vat_number FROM orders WHERE order_id = ?",
+                            (merchant_trade_no,)
+                        )
+                    
+                    invoice_info = cursor.fetchone()
+                    invoice_type = invoice_info[0] if invoice_info and invoice_info[0] else None
+                    vat_number = invoice_info[1] if invoice_info and invoice_info[1] else None
+                    
+                    # 開立發票（如果啟用）
+                    invoice_number = None
+                    if ECPAY_INVOICE_ENABLED and invoice_type:
+                        try:
+                            invoice_number = await issue_ecpay_invoice(
+                                trade_no=merchant_trade_no,
+                                amount=int(trade_amt),
+                                invoice_type=invoice_type,
+                                vat_number=vat_number,
+                                user_id=user_id
+                            )
+                            if invoice_number:
+                                logger.info(f"發票開立成功，訂單號: {merchant_trade_no}, 發票號: {invoice_number}")
+                            else:
+                                logger.warning(f"發票開立失敗，訂單號: {merchant_trade_no}")
+                        except Exception as e:
+                            logger.error(f"發票開立異常，訂單號: {merchant_trade_no}, 錯誤: {e}")
+                    
+                    # 解析付款時間
+                    paid_at_datetime = None
+                    if payment_date:
+                        try:
+                            paid_at_datetime = datetime.strptime(payment_date, "%Y/%m/%d %H:%M:%S")
+                        except:
+                            try:
+                                paid_at_datetime = datetime.strptime(payment_date, "%Y/%m/%d")
+                            except:
+                                paid_at_datetime = get_taiwan_time()
+                    else:
+                        paid_at_datetime = get_taiwan_time()
+                    
+                    # 更新訂單狀態為已付款
+                    if use_postgresql:
+                        cursor.execute("""
+                            UPDATE orders 
+                            SET payment_status = %s, 
+                                payment_method = %s,
+                                trade_no = %s,
+                                paid_at = %s, 
+                                expires_at = %s,
+                                invoice_number = %s,
+                                raw_payload = %s,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE order_id = %s
+                        """, ("paid", payment_type, trade_no, paid_at_datetime, expires_dt, invoice_number or merchant_trade_no, raw_payload_json, merchant_trade_no))
+                    else:
+                        cursor.execute("""
+                            UPDATE orders 
+                            SET payment_status = ?, 
+                                payment_method = ?,
+                                trade_no = ?,
+                                paid_at = ?, 
+                                expires_at = ?,
+                                invoice_number = ?,
+                                raw_payload = ?,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE order_id = ?
+                        """, ("paid", payment_type, trade_no, paid_at_datetime, expires_dt, invoice_number or merchant_trade_no, raw_payload_json, merchant_trade_no))
+                    
+                    # 更新/建立 licenses 記錄（只在付款完成時）
+                    if use_postgresql:
+                        cursor.execute("""
+                            INSERT INTO licenses (user_id, tier, seats, expires_at, status, updated_at)
+                            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                            ON CONFLICT (user_id)
+                            DO UPDATE SET
+                                tier = EXCLUDED.tier,
+                                expires_at = EXCLUDED.expires_at,
+                                status = EXCLUDED.status,
+                                updated_at = CURRENT_TIMESTAMP
+                        """, (user_id, plan_type, 1, expires_dt, "active"))
+                    else:
+                        cursor.execute("""
+                            INSERT OR REPLACE INTO licenses
+                            (user_id, tier, seats, expires_at, status, updated_at)
+                            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        """, (user_id, plan_type, 1, expires_dt.timestamp(), "active"))
+                    
+                    # 更新用戶訂閱狀態
+                    if use_postgresql:
+                        cursor.execute(
+                            "UPDATE user_auth SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s",
+                            (user_id,)
+                        )
+                    else:
+                        cursor.execute(
+                            "UPDATE user_auth SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                            (user_id,)
+                        )
+                    
+                    conn.commit()
+                    logger.info(f"訂單付款完成，訂單號: {merchant_trade_no}, 付款方式: {payment_type}")
+                    return PlainTextResponse("1|OK")
                 
-                # 更新訂單狀態
-                if use_postgresql:
-                    cursor.execute("""
-                        UPDATE orders 
-                        SET payment_status = %s, 
-                            paid_at = %s, 
-                            invoice_number = %s,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE order_id = %s
-                    """, ("paid", payment_date, invoice_number or trade_no, trade_no))
-                else:
-                    cursor.execute("""
-                        UPDATE orders 
-                        SET payment_status = ?, 
-                            paid_at = ?, 
-                            invoice_number = ?,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE order_id = ?
-                    """, ("paid", payment_date, invoice_number or trade_no, trade_no))
-                
-                # 更新/建立 licenses 記錄
-                if use_postgresql:
-                    cursor.execute("""
-                        INSERT INTO licenses (user_id, tier, seats, expires_at, status, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-                        ON CONFLICT (user_id)
-                        DO UPDATE SET
-                            tier = EXCLUDED.tier,
-                            expires_at = EXCLUDED.expires_at,
-                            status = EXCLUDED.status,
-                            updated_at = CURRENT_TIMESTAMP
-                    """, (user_id, plan_type, 1, expires_dt, "active"))
-                else:
-                    cursor.execute("""
-                        INSERT OR REPLACE INTO licenses
-                        (user_id, tier, seats, expires_at, status, updated_at)
-                        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    """, (user_id, plan_type, 1, expires_dt.timestamp(), "active"))
-                
-                # 更新用戶訂閱狀態
-                if use_postgresql:
-                    cursor.execute(
-                        "UPDATE user_auth SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s",
-                        (user_id,)
-                    )
-                else:
-                    cursor.execute(
-                        "UPDATE user_auth SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
-                        (user_id,)
-                    )
-                
+                # 如果不符合上述條件，記錄警告
+                logger.warning(f"未處理的付款回調，訂單號: {merchant_trade_no}, payment_type: {payment_type}, current_status: {current_status}, rtn_code: {rtn_code}")
                 conn.commit()
-                print(f"SUCCESS: 訂單付款成功，訂單號: {trade_no}, 用戶: {user_id}")
+                return PlainTextResponse("1|OK")
                 
             except Exception as e:
                 print(f"ERROR: 更新訂單狀態失敗: {e}")
@@ -6743,21 +6866,58 @@ def create_app() -> FastAPI:
                 )
             
             # 獲取訂單資訊
-            trade_no = params.get("MerchantTradeNo", "")
+            merchant_trade_no = params.get("MerchantTradeNo", "")
             rtn_code = params.get("RtnCode", "")
+            payment_type = params.get("PaymentType", "")
+            
+            # 查詢訂單狀態
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            try:
+                if use_postgresql:
+                    cursor.execute(
+                        "SELECT payment_status FROM orders WHERE order_id = %s",
+                        (merchant_trade_no,)
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT payment_status FROM orders WHERE order_id = ?",
+                        (merchant_trade_no,)
+                    )
+                
+                order = cursor.fetchone()
+                order_status = order[0] if order else None
+                
+                cursor.close()
+                conn.close()
+            except Exception as e:
+                logger.error(f"查詢訂單狀態失敗: {e}")
+                order_status = None
+            
+            # 判斷付款方式類型
+            is_atm_cvs = payment_type in ("ATM", "CVS", "BARCODE")
             
             # 檢查付款狀態
             if str(rtn_code) == "1":
                 # 付款成功，redirect 到前端成功頁
                 return RedirectResponse(
-                    url=f"{ECPAY_RETURN_URL}?status=success&order_id={trade_no}",
+                    url=f"{ECPAY_RETURN_URL}?status=success&order_id={merchant_trade_no}",
+                    status_code=302
+                )
+            elif is_atm_cvs and order_status == "pending":
+                # ATM/超商取號成功，但尚未付款
+                return RedirectResponse(
+                    url=f"{ECPAY_RETURN_URL}?status=pending&order_id={merchant_trade_no}",
                     status_code=302
                 )
             else:
                 # 付款失敗，redirect 到前端失敗頁
                 rtn_msg = params.get("RtnMsg", "付款失敗")
                 return RedirectResponse(
-                    url=f"{ECPAY_RETURN_URL}?status=failed&order_id={trade_no}&message={urllib.parse.quote(rtn_msg)}",
+                    url=f"{ECPAY_RETURN_URL}?status=failed&order_id={merchant_trade_no}&message={urllib.parse.quote(rtn_msg)}",
                     status_code=302
                 )
         
@@ -7517,7 +7677,7 @@ def create_app() -> FastAPI:
                 cursor.execute("""
                     SELECT id, order_id, plan_type, amount, currency, payment_method, 
                            payment_status, paid_at, expires_at, invoice_number, 
-                           invoice_type, created_at
+                           invoice_type, vat_number, name, email, phone, note, created_at
                     FROM orders 
                     WHERE user_id = %s
                     ORDER BY created_at DESC
@@ -7526,7 +7686,7 @@ def create_app() -> FastAPI:
                 cursor.execute("""
                     SELECT id, order_id, plan_type, amount, currency, payment_method, 
                            payment_status, paid_at, expires_at, invoice_number, 
-                           invoice_type, created_at
+                           invoice_type, vat_number, name, email, phone, note, created_at
                     FROM orders 
                     WHERE user_id = ?
                     ORDER BY created_at DESC
@@ -7545,11 +7705,16 @@ def create_app() -> FastAPI:
                     "currency": row[4],
                     "payment_method": row[5],
                     "payment_status": row[6],
-                    "paid_at": row[7],
-                    "expires_at": row[8],
+                    "paid_at": str(row[7]) if row[7] else None,
+                    "expires_at": str(row[8]) if row[8] else None,
                     "invoice_number": row[9],
                     "invoice_type": row[10],
-                    "created_at": row[11]
+                    "vat_number": row[11],
+                    "name": row[12],
+                    "email": row[13],
+                    "phone": row[14],
+                    "note": row[15],
+                    "created_at": str(row[16]) if row[16] else None
                 })
             
             return {"orders": orders}
@@ -7573,7 +7738,7 @@ def create_app() -> FastAPI:
                 cursor.execute("""
                     SELECT id, order_id, plan_type, amount, currency, payment_method, 
                            payment_status, paid_at, expires_at, invoice_number, 
-                           invoice_type, created_at
+                           invoice_type, vat_number, name, email, phone, note, created_at
                     FROM orders 
                     WHERE user_id = %s
                     ORDER BY created_at DESC
@@ -7582,7 +7747,7 @@ def create_app() -> FastAPI:
                 cursor.execute("""
                     SELECT id, order_id, plan_type, amount, currency, payment_method, 
                            payment_status, paid_at, expires_at, invoice_number, 
-                           invoice_type, created_at
+                           invoice_type, vat_number, name, email, phone, note, created_at
                     FROM orders 
                     WHERE user_id = ?
                     ORDER BY created_at DESC
@@ -7605,7 +7770,12 @@ def create_app() -> FastAPI:
                     "expires_at": str(row[8]) if row[8] else None,
                     "invoice_number": row[9],
                     "invoice_type": row[10],
-                    "created_at": str(row[11]) if row[11] else None
+                    "vat_number": row[11],
+                    "name": row[12],
+                    "email": row[13],
+                    "phone": row[14],
+                    "note": row[15],
+                    "created_at": str(row[16]) if row[16] else None
                 })
             
             return {"orders": orders}
@@ -7865,12 +8035,18 @@ def create_app() -> FastAPI:
                     "currency": row[5],
                     "payment_method": row[6],
                     "payment_status": row[7],
-                    "paid_at": row[8],
-                    "expires_at": row[9],
+                    "paid_at": str(row[8]) if row[8] else None,
+                    "expires_at": str(row[9]) if row[9] else None,
                     "invoice_number": row[10],
-                    "created_at": row[11],
-                    "user_name": row[12] or "未知用戶",
-                    "user_email": row[13] or ""
+                    "invoice_type": row[11],
+                    "vat_number": row[12],
+                    "name": row[13],  # 訂單填寫的姓名
+                    "email": row[14],  # 訂單填寫的 Email
+                    "phone": row[15],  # 訂單填寫的手機
+                    "note": row[16],  # 備註
+                    "created_at": str(row[17]) if row[17] else None,
+                    "user_name": row[18] or "未知用戶",  # 用戶帳號的姓名
+                    "user_email": row[19] or ""  # 用戶帳號的 Email
                 })
             
             conn.close()
