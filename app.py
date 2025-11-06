@@ -7556,6 +7556,135 @@ def create_app() -> FastAPI:
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    @app.get("/api/user/orders")
+    async def get_my_orders(current_user_id: Optional[str] = Depends(get_current_user)):
+        """獲取當前用戶的訂單列表（簡化版，自動從 token 取得 user_id）"""
+        if not current_user_id:
+            return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT id, order_id, plan_type, amount, currency, payment_method, 
+                           payment_status, paid_at, expires_at, invoice_number, 
+                           invoice_type, created_at
+                    FROM orders 
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                """, (current_user_id,))
+            else:
+                cursor.execute("""
+                    SELECT id, order_id, plan_type, amount, currency, payment_method, 
+                           payment_status, paid_at, expires_at, invoice_number, 
+                           invoice_type, created_at
+                    FROM orders 
+                    WHERE user_id = ?
+                    ORDER BY created_at DESC
+                """, (current_user_id,))
+            
+            rows = cursor.fetchall()
+            conn.close()
+            
+            orders = []
+            for row in rows:
+                orders.append({
+                    "id": row[0],
+                    "order_id": row[1],
+                    "plan_type": row[2],
+                    "amount": row[3],
+                    "currency": row[4],
+                    "payment_method": row[5],
+                    "payment_status": row[6],
+                    "paid_at": str(row[7]) if row[7] else None,
+                    "expires_at": str(row[8]) if row[8] else None,
+                    "invoice_number": row[9],
+                    "invoice_type": row[10],
+                    "created_at": str(row[11]) if row[11] else None
+                })
+            
+            return {"orders": orders}
+        except Exception as e:
+            logger.error(f"獲取訂單列表失敗: {e}", exc_info=True)
+            return JSONResponse({"error": "服務器錯誤，請稍後再試"}, status_code=500)
+
+    @app.get("/api/user/subscription")
+    async def get_subscription_status(current_user_id: Optional[str] = Depends(get_current_user)):
+        """獲取當前用戶的訂閱狀態（簡化版，自動從 token 取得 user_id）"""
+        if not current_user_id:
+            return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 查詢訂閱狀態
+            if use_postgresql:
+                cursor.execute(
+                    "SELECT is_subscribed FROM user_auth WHERE user_id = %s",
+                    (current_user_id,)
+                )
+            else:
+                cursor.execute(
+                    "SELECT is_subscribed FROM user_auth WHERE user_id = ?",
+                    (current_user_id,)
+                )
+            
+            user_row = cursor.fetchone()
+            is_subscribed = user_row[0] if user_row and user_row[0] else False
+            
+            # 查詢授權資訊
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT tier, seats, source, start_at, expires_at, status
+                    FROM licenses 
+                    WHERE user_id = %s AND status = 'active'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """, (current_user_id,))
+            else:
+                cursor.execute("""
+                    SELECT tier, seats, source, start_at, expires_at, status
+                    FROM licenses 
+                    WHERE user_id = ? AND status = 'active'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """, (current_user_id,))
+            
+            license_row = cursor.fetchone()
+            conn.close()
+            
+            result = {
+                "user_id": current_user_id,
+                "is_subscribed": bool(is_subscribed),
+                "tier": None,
+                "expires_at": None,
+                "status": "inactive"
+            }
+            
+            if license_row:
+                result.update({
+                    "tier": license_row[0],
+                    "seats": license_row[1],
+                    "source": license_row[2],
+                    "start_at": str(license_row[3]) if license_row[3] else None,
+                    "expires_at": str(license_row[4]) if license_row[4] else None,
+                    "status": license_row[5] or "active"
+                })
+            
+            return result
+        except Exception as e:
+            logger.error(f"獲取訂閱狀態失敗: {e}", exc_info=True)
+            return JSONResponse({"error": "服務器錯誤，請稍後再試"}, status_code=500)
+
     @app.get("/api/user/license/{user_id}")
     async def get_user_license(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶的授權資訊"""
