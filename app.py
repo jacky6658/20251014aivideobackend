@@ -662,6 +662,26 @@ def init_database():
     except Exception as e:
         print(f"WARN: 檢查 orders 表結構時出錯: {e}")
     
+    # 創建授權啟用表（license_activations）
+    execute_sql("""
+        CREATE TABLE IF NOT EXISTS license_activations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            activation_token TEXT UNIQUE NOT NULL,
+            channel TEXT NOT NULL,
+            order_id TEXT NOT NULL,
+            email TEXT NOT NULL,
+            plan_type TEXT NOT NULL,
+            amount INTEGER NOT NULL,
+            status TEXT DEFAULT 'pending',
+            activated_at TIMESTAMP,
+            activated_by_user_id TEXT,
+            link_expires_at TIMESTAMP,
+            license_expires_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
     # 創建管理員帳號表
     execute_sql("""
         CREATE TABLE IF NOT EXISTS admin_accounts (
@@ -1351,11 +1371,11 @@ def generate_access_token(user_id: str) -> str:
             "exp": get_taiwan_time().timestamp() + 86400  # 24小時過期
         }
         import json
-        header = {"alg": "HS256", "typ": "JWT"}
-        encoded_header = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip('=')
-        encoded_payload = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip('=')
-        signature = hashlib.sha256(f"{encoded_header}.{encoded_payload}.{JWT_SECRET}".encode()).hexdigest()
-        return f"{encoded_header}.{encoded_payload}.{signature}"
+    header = {"alg": "HS256", "typ": "JWT"}
+    encoded_header = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip('=')
+    encoded_payload = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip('=')
+    signature = hashlib.sha256(f"{encoded_header}.{encoded_payload}.{JWT_SECRET}".encode()).hexdigest()
+    return f"{encoded_header}.{encoded_payload}.{signature}"
 
 
 def verify_access_token(token: str, allow_expired: bool = False) -> Optional[str]:
@@ -2209,7 +2229,7 @@ def create_app() -> FastAPI:
 
             # 使用用戶的 API Key 或系統預設的
             genai.configure(api_key=api_key)
-            
+
             model_obj = genai.GenerativeModel(
                 model_name=model_name,
                 system_instruction=system_text
@@ -2278,7 +2298,7 @@ def create_app() -> FastAPI:
 
             # 使用用戶的 API Key 或系統預設的
             genai.configure(api_key=api_key)
-            
+
             model_obj = genai.GenerativeModel(
                 model_name=model_name,
                 system_instruction=system_text
@@ -2348,7 +2368,7 @@ def create_app() -> FastAPI:
 
             # 使用用戶的 API Key 或系統預設的
             genai.configure(api_key=api_key)
-            
+
             model_obj = genai.GenerativeModel(
                 model_name=model_name,
                 system_instruction=system_text
@@ -2426,7 +2446,7 @@ def create_app() -> FastAPI:
 
         # 使用用戶的 API Key 或系統預設的
         genai.configure(api_key=api_key)
-        
+
         model = genai.GenerativeModel(model_name)
         chat = model.start_chat(history=[
             {"role": "user", "parts": system_text},
@@ -4035,9 +4055,9 @@ def create_app() -> FastAPI:
                 if use_postgresql:
                     cursor.execute("""
                         UPDATE user_auth 
-                        SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP
+                            SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP
                         WHERE user_id = %s
-                    """, (user_id,))
+                        """, (user_id,))
                     
                     # 更新/建立 licenses 記錄
                     # 準備 features_json（包含管理員備註）
@@ -4061,9 +4081,9 @@ def create_app() -> FastAPI:
                 else:
                     cursor.execute("""
                         UPDATE user_auth 
-                        SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP
+                            SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP
                         WHERE user_id = ?
-                    """, (user_id,))
+                        """, (user_id,))
                     
                     # 更新/建立 licenses 記錄
                     # 準備 features_json（包含管理員備註）
@@ -6168,7 +6188,7 @@ def create_app() -> FastAPI:
 
             conn.close()
             return {"type": export_type, "count": len(rows), "rows": rows}
-
+        
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -6984,6 +7004,419 @@ def create_app() -> FastAPI:
                 url=f"{ECPAY_RETURN_URL}?status=error&message=處理失敗",
                 status_code=302
             )
+    
+    # ===== 多通路授權整合 API =====
+    
+    @app.post("/api/webhook/verify-license")
+    async def verify_license_webhook(request: Request):
+        """接收 n8n/Portaly/PPA 的授權通知，產生授權連結
+        
+        這個端點由 n8n 調用，用於建立授權記錄並生成授權連結。
+        
+        請求參數：
+        - channel: 通路名稱（例如：portaly, ppa, n8n）
+        - order_id: 通路訂單號
+        - email: 用戶 Email
+        - plan_type: 方案類型（monthly/yearly），預設為 yearly（1年）
+        - amount: 金額（可選）
+        - product_name: 產品名稱（可選）
+        
+        返回：
+        - activation_token: 授權 token
+        - activation_link: 授權連結（可直接寄送給用戶）
+        - expires_at: 授權到期時間
+        """
+        try:
+            body = await request.json()
+            channel = body.get("channel", "n8n")  # 預設為 n8n
+            order_id = body.get("order_id")
+            email = body.get("email")
+            plan_type = body.get("plan_type", "yearly")  # 預設為 1 年
+            amount = body.get("amount", 0)
+            product_name = body.get("product_name", "")
+            
+            # 驗證必填欄位
+            if not order_id or not email:
+                return JSONResponse({"error": "缺少必填欄位：order_id 和 email"}, status_code=400)
+            
+            # 判斷方案類型（如果未提供，從 product_name 或 amount 判斷）
+            if plan_type not in ("monthly", "yearly"):
+                if "年" in product_name or amount >= 19900:
+                    plan_type = "yearly"
+                else:
+                    plan_type = "yearly"  # 預設為 1 年
+            
+            # 生成授權 token
+            activation_token = secrets.token_urlsafe(32)
+            
+            # 計算授權到期日（1 年 = 365 天）
+            days = 30 if plan_type == "monthly" else 365
+            license_expires_at = get_taiwan_time() + timedelta(days=days)
+            
+            # 授權連結有效期限（7 天內有效）
+            link_expires_at = get_taiwan_time() + timedelta(days=7)
+            
+            # 儲存授權記錄
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            try:
+                if use_postgresql:
+                    cursor.execute("""
+                        INSERT INTO license_activations 
+                        (activation_token, channel, order_id, email, plan_type, amount, 
+                         link_expires_at, license_expires_at, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    """, (activation_token, channel, order_id, email, plan_type, amount, 
+                          link_expires_at, license_expires_at))
+                else:
+                    cursor.execute("""
+                        INSERT INTO license_activations 
+                        (activation_token, channel, order_id, email, plan_type, amount, 
+                         link_expires_at, license_expires_at, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """, (activation_token, channel, order_id, email, plan_type, amount, 
+                          link_expires_at.timestamp(), license_expires_at.timestamp()))
+                
+                if not use_postgresql:
+                    conn.commit()
+                cursor.close()
+                conn.close()
+            except Exception as e:
+                logger.error(f"儲存授權記錄失敗: {e}", exc_info=True)
+                if not use_postgresql:
+                    conn.rollback()
+                conn.close()
+                return JSONResponse({"error": "儲存授權記錄失敗"}, status_code=500)
+            
+            # 生成授權連結
+            frontend_url = os.getenv("FRONTEND_URL", "https://aivideonew.zeabur.app")
+            activation_link = f"{frontend_url}/activate?token={activation_token}"
+            
+            logger.info(f"授權記錄建立成功: channel={channel}, order_id={order_id}, email={email}, plan_type={plan_type}")
+            
+            return {
+                "status": "success",
+                "activation_token": activation_token,
+                "activation_link": activation_link,
+                "plan_type": plan_type,
+                "license_expires_at": license_expires_at.isoformat(),
+                "link_expires_at": link_expires_at.isoformat(),
+                "message": "授權連結已生成，請將 activation_link 寄送給用戶"
+            }
+            
+        except Exception as e:
+            logger.error(f"處理授權 Webhook 失敗: {e}", exc_info=True)
+            return JSONResponse({"error": f"處理失敗: {str(e)}"}, status_code=500)
+    
+    @app.get("/api/user/license/verify")
+    async def verify_license_token(
+        token: str,
+        current_user_id: Optional[str] = Depends(get_current_user)
+    ):
+        """驗證授權連結並啟用訂閱
+        
+        用戶點擊授權連結時，這個端點會：
+        1. 驗證授權 token
+        2. 檢查是否已使用或過期
+        3. 如果用戶未登入，導向登入頁
+        4. 如果用戶已登入，啟用訂閱並更新 licenses 表
+        """
+        if not token:
+            return JSONResponse({"error": "缺少授權 token"}, status_code=400)
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        database_url = os.getenv("DATABASE_URL")
+        use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+        
+        try:
+            # 查詢授權記錄
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT id, channel, order_id, email, plan_type, amount, status, 
+                           link_expires_at, license_expires_at, activated_at, activated_by_user_id
+                    FROM license_activations 
+                    WHERE activation_token = %s
+                """, (token,))
+            else:
+                cursor.execute("""
+                    SELECT id, channel, order_id, email, plan_type, amount, status, 
+                           link_expires_at, license_expires_at, activated_at, activated_by_user_id
+                    FROM license_activations 
+                    WHERE activation_token = ?
+                """, (token,))
+            
+            activation = cursor.fetchone()
+            
+            if not activation:
+                return JSONResponse({"error": "無效的授權連結"}, status_code=404)
+            
+            activation_id, channel, order_id, email, plan_type, amount, status, link_expires_at, license_expires_at, activated_at, activated_by_user_id = activation
+            
+            # 檢查是否已啟用
+            if status == "activated":
+                return JSONResponse({"error": "此授權連結已使用"}, status_code=400)
+            
+            # 檢查連結是否過期
+            if link_expires_at:
+                if use_postgresql:
+                    expire_dt = link_expires_at
+                else:
+                    expire_dt = datetime.fromtimestamp(link_expires_at)
+                
+                if expire_dt < get_taiwan_time():
+                    # 更新狀態為過期
+                    if use_postgresql:
+                        cursor.execute(
+                            "UPDATE license_activations SET status = 'expired' WHERE id = %s",
+                            (activation_id,)
+                        )
+                    else:
+                        cursor.execute(
+                            "UPDATE license_activations SET status = 'expired' WHERE id = ?",
+                            (activation_id,)
+                        )
+                    if not use_postgresql:
+                        conn.commit()
+                    return JSONResponse({"error": "授權連結已過期"}, status_code=400)
+            
+            # 如果用戶未登入，導向登入頁（帶上 token）
+            if not current_user_id:
+                frontend_url = os.getenv("FRONTEND_URL", "https://aivideonew.zeabur.app")
+                return RedirectResponse(
+                    url=f"{frontend_url}/#login?activation_token={token}",
+                    status_code=302
+                )
+            
+            # 獲取授權到期日
+            if use_postgresql:
+                license_expire_dt = license_expires_at
+            else:
+                license_expire_dt = datetime.fromtimestamp(license_expires_at) if license_expires_at else None
+            
+            if not license_expire_dt:
+                # 如果沒有設定到期日，計算 1 年
+                days = 30 if plan_type == "monthly" else 365
+                license_expire_dt = get_taiwan_time() + timedelta(days=days)
+            
+            # 更新授權記錄為已啟用
+            if use_postgresql:
+                cursor.execute("""
+                    UPDATE license_activations 
+                    SET status = 'activated',
+                        activated_at = CURRENT_TIMESTAMP,
+                        activated_by_user_id = %s
+                    WHERE id = %s
+                """, (current_user_id, activation_id))
+            else:
+                cursor.execute("""
+                    UPDATE license_activations 
+                    SET status = 'activated',
+                        activated_at = CURRENT_TIMESTAMP,
+                        activated_by_user_id = ?
+                    WHERE id = ?
+                """, (current_user_id, activation_id))
+            
+            # 建立/更新 licenses 記錄
+            if use_postgresql:
+                cursor.execute("""
+                    INSERT INTO licenses (user_id, tier, seats, expires_at, status, source, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (user_id)
+                    DO UPDATE SET
+                        tier = EXCLUDED.tier,
+                        expires_at = EXCLUDED.expires_at,
+                        status = EXCLUDED.status,
+                        source = EXCLUDED.source,
+                        updated_at = CURRENT_TIMESTAMP
+                """, (current_user_id, plan_type, 1, license_expire_dt, "active", channel))
+            else:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO licenses
+                    (user_id, tier, seats, expires_at, status, source, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (current_user_id, plan_type, 1, license_expire_dt.timestamp(), "active", channel))
+            
+            # 更新用戶訂閱狀態
+            if use_postgresql:
+                cursor.execute(
+                    "UPDATE user_auth SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s",
+                    (current_user_id,)
+                )
+            else:
+                cursor.execute(
+                    "UPDATE user_auth SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                    (current_user_id,)
+                )
+            
+            if not use_postgresql:
+                conn.commit()
+            cursor.close()
+            conn.close()
+            
+            logger.info(f"授權啟用成功: activation_id={activation_id}, user_id={current_user_id}, plan_type={plan_type}, expires_at={license_expire_dt}")
+            
+            # Redirect 到前端成功頁
+            frontend_url = os.getenv("FRONTEND_URL", "https://aivideonew.zeabur.app")
+            return RedirectResponse(
+                url=f"{frontend_url}/?activation=success&plan={plan_type}",
+                status_code=302
+            )
+            
+        except Exception as e:
+            logger.error(f"驗證授權連結失敗: {e}", exc_info=True)
+            if not use_postgresql:
+                conn.rollback()
+            conn.close()
+            return JSONResponse({"error": f"驗證失敗: {str(e)}"}, status_code=500)
+    
+    @app.delete("/api/admin/license-activations/{activation_id}")
+    async def delete_license_activation(
+        activation_id: int,
+        admin_user: str = Depends(get_admin_user)
+    ):
+        """刪除授權啟用記錄（管理員專用）
+        
+        用於刪除測試資料或錯誤的授權記錄。
+        """
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 先查詢記錄是否存在
+            if use_postgresql:
+                cursor.execute(
+                    "SELECT id, order_id, email, status FROM license_activations WHERE id = %s",
+                    (activation_id,)
+                )
+            else:
+                cursor.execute(
+                    "SELECT id, order_id, email, status FROM license_activations WHERE id = ?",
+                    (activation_id,)
+                )
+            
+            record = cursor.fetchone()
+            
+            if not record:
+                return JSONResponse({"error": "找不到指定的授權記錄"}, status_code=404)
+            
+            order_id, email, status = record[1], record[2], record[3]
+            
+            # 刪除記錄
+            if use_postgresql:
+                cursor.execute(
+                    "DELETE FROM license_activations WHERE id = %s",
+                    (activation_id,)
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM license_activations WHERE id = ?",
+                    (activation_id,)
+                )
+            
+            if not use_postgresql:
+                conn.commit()
+            cursor.close()
+            conn.close()
+            
+            logger.info(f"管理員刪除授權記錄: activation_id={activation_id}, order_id={order_id}, email={email}, status={status}")
+            
+            return {
+                "message": "授權記錄已刪除",
+                "activation_id": activation_id,
+                "order_id": order_id,
+                "email": email
+            }
+            
+        except Exception as e:
+            logger.error(f"刪除授權記錄失敗: {e}", exc_info=True)
+            if not use_postgresql:
+                conn.rollback()
+            conn.close()
+            return JSONResponse({"error": f"刪除失敗: {str(e)}"}, status_code=500)
+    
+    @app.get("/api/admin/license-activations")
+    async def list_license_activations(
+        status: Optional[str] = None,
+        channel: Optional[str] = None,
+        limit: int = 100,
+        admin_user: str = Depends(get_admin_user)
+    ):
+        """列出所有授權啟用記錄（管理員專用）
+        
+        用於查看和管理授權記錄，包括測試資料。
+        
+        查詢參數：
+        - status: 篩選狀態（pending/activated/expired）
+        - channel: 篩選通路（n8n/portaly/ppa）
+        - limit: 限制筆數（預設 100）
+        """
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 建立查詢
+            query = "SELECT id, activation_token, channel, order_id, email, plan_type, amount, status, activated_at, link_expires_at, license_expires_at, created_at FROM license_activations WHERE 1=1"
+            params = []
+            
+            if status:
+                if use_postgresql:
+                    query += " AND status = %s"
+                else:
+                    query += " AND status = ?"
+                params.append(status)
+            
+            if channel:
+                if use_postgresql:
+                    query += " AND channel = %s"
+                else:
+                    query += " AND channel = ?"
+                params.append(channel)
+            
+            query += " ORDER BY created_at DESC"
+            
+            if use_postgresql:
+                query += f" LIMIT {limit}"
+            else:
+                query += f" LIMIT ?"
+                params.append(limit)
+            
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+            conn.close()
+            
+            activations = []
+            for row in rows:
+                activations.append({
+                    "id": row[0],
+                    "activation_token": row[1][:20] + "..." if row[1] and len(row[1]) > 20 else row[1],  # 只顯示前20字元
+                    "channel": row[2],
+                    "order_id": row[3],
+                    "email": row[4],
+                    "plan_type": row[5],
+                    "amount": row[6],
+                    "status": row[7],
+                    "activated_at": str(row[8]) if row[8] else None,
+                    "link_expires_at": str(row[9]) if row[9] else None,
+                    "license_expires_at": str(row[10]) if row[10] else None,
+                    "created_at": str(row[11]) if row[11] else None
+                })
+            
+            return {
+                "activations": activations,
+                "total": len(activations)
+            }
+            
+        except Exception as e:
+            logger.error(f"查詢授權記錄失敗: {e}", exc_info=True)
+            return JSONResponse({"error": f"查詢失敗: {str(e)}"}, status_code=500)
     
     @app.post("/api/payment/refund")
     async def refund_order(
