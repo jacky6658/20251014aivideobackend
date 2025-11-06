@@ -605,6 +605,63 @@ def init_database():
         )
     """)
     
+    # 檢查並新增缺失的欄位（向後兼容）
+    try:
+        if use_postgresql:
+            # PostgreSQL: 檢查欄位是否存在
+            new_columns = [
+                ('vat_number', 'TEXT'),
+                ('name', 'TEXT'),
+                ('email', 'TEXT'),
+                ('phone', 'TEXT'),
+                ('note', 'TEXT'),
+                ('trade_no', 'TEXT'),
+                ('expire_date', 'TIMESTAMP'),
+                ('payment_code', 'TEXT'),
+                ('bank_code', 'TEXT'),
+                ('raw_payload', 'TEXT')
+            ]
+            
+            for col_name, col_type in new_columns:
+                cursor.execute("""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name = 'orders' AND column_name = %s
+                """, (col_name,))
+                if not cursor.fetchone():
+                    try:
+                        cursor.execute(f"ALTER TABLE orders ADD COLUMN {col_name} {col_type}")
+                        print(f"INFO: 已新增欄位 orders.{col_name}")
+                    except Exception as e:
+                        print(f"WARN: 新增欄位 orders.{col_name} 失敗: {e}")
+        else:
+            # SQLite: 檢查欄位是否存在
+            cursor.execute("PRAGMA table_info(orders)")
+            existing_columns = [col[1] for col in cursor.fetchall()]
+            
+            new_columns = [
+                ('vat_number', 'TEXT'),
+                ('name', 'TEXT'),
+                ('email', 'TEXT'),
+                ('phone', 'TEXT'),
+                ('note', 'TEXT'),
+                ('trade_no', 'TEXT'),
+                ('expire_date', 'TIMESTAMP'),
+                ('payment_code', 'TEXT'),
+                ('bank_code', 'TEXT'),
+                ('raw_payload', 'TEXT')
+            ]
+            
+            for col_name, col_type in new_columns:
+                if col_name not in existing_columns:
+                    try:
+                        cursor.execute(f"ALTER TABLE orders ADD COLUMN {col_name} {col_type}")
+                        print(f"INFO: 已新增欄位 orders.{col_name}")
+                    except Exception as e:
+                        print(f"WARN: 新增欄位 orders.{col_name} 失敗: {e}")
+    except Exception as e:
+        print(f"WARN: 檢查 orders 表結構時出錯: {e}")
+    
     # 創建管理員帳號表
     execute_sql("""
         CREATE TABLE IF NOT EXISTS admin_accounts (
@@ -7734,49 +7791,115 @@ def create_app() -> FastAPI:
             database_url = os.getenv("DATABASE_URL")
             use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
             
-            if use_postgresql:
-                cursor.execute("""
-                    SELECT id, order_id, plan_type, amount, currency, payment_method, 
-                           payment_status, paid_at, expires_at, invoice_number, 
-                           invoice_type, vat_number, name, email, phone, note, created_at
-                    FROM orders 
-                    WHERE user_id = %s
-                    ORDER BY created_at DESC
-                """, (current_user_id,))
+            # 先檢查表結構，如果欄位不存在則使用基本欄位
+            try:
+                if use_postgresql:
+                    # 檢查是否有新欄位
+                    cursor.execute("""
+                        SELECT column_name 
+                        FROM information_schema.columns 
+                        WHERE table_name = 'orders' AND column_name IN ('vat_number', 'name', 'email', 'phone', 'note')
+                    """)
+                    existing_columns = [row[0] for row in cursor.fetchall()]
+                    has_new_columns = all(col in existing_columns for col in ['vat_number', 'name', 'email', 'phone', 'note'])
+                else:
+                    # SQLite: 檢查表結構
+                    cursor.execute("PRAGMA table_info(orders)")
+                    columns_info = cursor.fetchall()
+                    column_names = [col[1] for col in columns_info]
+                    has_new_columns = all(col in column_names for col in ['vat_number', 'name', 'email', 'phone', 'note'])
+            except Exception as e:
+                logger.warning(f"檢查表結構失敗，使用基本欄位: {e}")
+                has_new_columns = False
+            
+            # 根據表結構選擇查詢
+            if has_new_columns:
+                if use_postgresql:
+                    cursor.execute("""
+                        SELECT id, order_id, plan_type, amount, currency, payment_method, 
+                               payment_status, paid_at, expires_at, invoice_number, 
+                               invoice_type, vat_number, name, email, phone, note, created_at
+                        FROM orders 
+                        WHERE user_id = %s
+                        ORDER BY created_at DESC
+                    """, (current_user_id,))
+                else:
+                    cursor.execute("""
+                        SELECT id, order_id, plan_type, amount, currency, payment_method, 
+                               payment_status, paid_at, expires_at, invoice_number, 
+                               invoice_type, vat_number, name, email, phone, note, created_at
+                        FROM orders 
+                        WHERE user_id = ?
+                        ORDER BY created_at DESC
+                    """, (current_user_id,))
             else:
-                cursor.execute("""
-                    SELECT id, order_id, plan_type, amount, currency, payment_method, 
-                           payment_status, paid_at, expires_at, invoice_number, 
-                           invoice_type, vat_number, name, email, phone, note, created_at
-                    FROM orders 
-                    WHERE user_id = ?
-                    ORDER BY created_at DESC
-                """, (current_user_id,))
+                # 使用基本欄位（向後兼容）
+                if use_postgresql:
+                    cursor.execute("""
+                        SELECT id, order_id, plan_type, amount, currency, payment_method, 
+                               payment_status, paid_at, expires_at, invoice_number, 
+                               invoice_type, created_at
+                        FROM orders 
+                        WHERE user_id = %s
+                        ORDER BY created_at DESC
+                    """, (current_user_id,))
+                else:
+                    cursor.execute("""
+                        SELECT id, order_id, plan_type, amount, currency, payment_method, 
+                               payment_status, paid_at, expires_at, invoice_number, 
+                               invoice_type, created_at
+                        FROM orders 
+                        WHERE user_id = ?
+                        ORDER BY created_at DESC
+                    """, (current_user_id,))
             
             rows = cursor.fetchall()
             conn.close()
             
             orders = []
             for row in rows:
-                orders.append({
-                    "id": row[0],
-                    "order_id": row[1],
-                    "plan_type": row[2],
-                    "amount": row[3],
-                    "currency": row[4],
-                    "payment_method": row[5],
-                    "payment_status": row[6],
-                    "paid_at": str(row[7]) if row[7] else None,
-                    "expires_at": str(row[8]) if row[8] else None,
-                    "invoice_number": row[9],
-                    "invoice_type": row[10],
-                    "vat_number": row[11],
-                    "name": row[12],
-                    "email": row[13],
-                    "phone": row[14],
-                    "note": row[15],
-                    "created_at": str(row[16]) if row[16] else None
-                })
+                if has_new_columns and len(row) >= 17:
+                    # 有新欄位
+                    orders.append({
+                        "id": row[0],
+                        "order_id": row[1],
+                        "plan_type": row[2],
+                        "amount": row[3],
+                        "currency": row[4],
+                        "payment_method": row[5],
+                        "payment_status": row[6],
+                        "paid_at": str(row[7]) if row[7] else None,
+                        "expires_at": str(row[8]) if row[8] else None,
+                        "invoice_number": row[9],
+                        "invoice_type": row[10],
+                        "vat_number": row[11],
+                        "name": row[12],
+                        "email": row[13],
+                        "phone": row[14],
+                        "note": row[15],
+                        "created_at": str(row[16]) if row[16] else None
+                    })
+                else:
+                    # 基本欄位（向後兼容）
+                    orders.append({
+                        "id": row[0],
+                        "order_id": row[1],
+                        "plan_type": row[2],
+                        "amount": row[3],
+                        "currency": row[4],
+                        "payment_method": row[5],
+                        "payment_status": row[6],
+                        "paid_at": str(row[7]) if row[7] else None,
+                        "expires_at": str(row[8]) if row[8] else None,
+                        "invoice_number": row[9],
+                        "invoice_type": row[10],
+                        "vat_number": None,
+                        "name": None,
+                        "email": None,
+                        "phone": None,
+                        "note": None,
+                        "created_at": str(row[11]) if len(row) > 11 and row[11] else None
+                    })
             
             return {"orders": orders}
         except Exception as e:
