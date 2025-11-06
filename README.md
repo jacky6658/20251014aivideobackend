@@ -434,6 +434,91 @@ A: 檢查：
 
 ## 更新日誌
 
+### 2025-11-06 - 安全漏洞修復（JWT、BYOK、Rate Limiting）
+
+#### 🔒 安全修復
+- **JWT 實作修復**：使用標準 PyJWT 庫替換自定義實現，修復嚴重安全漏洞
+  - 修復簽名算法弱點（SHA256 → HMAC-SHA256）
+  - 修復 Base64 填充處理不當
+  - 修復 Timing Attack 風險
+  - 保持向後兼容（如果 PyJWT 未安裝，回退到舊實現）
+  
+- **BYOK 加密金鑰管理強化**：加強金鑰格式驗證和環境變數檢查
+  - 強制要求生產環境設定 `LLM_KEY_ENCRYPTION_KEY` 環境變數
+  - 驗證金鑰格式（32 字節 base64 編碼）
+  - 移除臨時金鑰生成（防止重啟後數據無法解密）
+  - 優化錯誤處理，不影響應用啟動
+  
+- **Rate Limiting 實作**：添加 API 速率限制，防止暴力破解和 DoS 攻擊
+  - 使用 slowapi 庫實作速率限制
+  - `POST /api/user/llm-keys` - 限制 5 次/分鐘
+  - `POST /api/user/llm-keys/test` - 限制 3 次/分鐘
+  - 保持向後兼容（如果 slowapi 未安裝，功能禁用但不影響運行）
+
+#### 🛠️ 技術修改
+**檔案：app.py**
+
+**1. 導入安全庫（約 14-30 行）**：
+```python
+# JWT 支援
+try:
+    import jwt
+    JWT_AVAILABLE = True
+except ImportError:
+    JWT_AVAILABLE = False
+    print("WARNING: PyJWT 未安裝，將使用舊的 JWT 實現。請執行: pip install PyJWT")
+
+# Rate Limiting 支援
+try:
+    from slowapi import Limiter, _rate_limit_exceeded_handler
+    from slowapi.util import get_remote_address
+    from slowapi.errors import RateLimitExceeded
+    SLOWAPI_AVAILABLE = True
+except ImportError:
+    SLOWAPI_AVAILABLE = False
+    print("WARNING: slowapi 未安裝，Rate Limiting 功能將無法使用。請執行: pip install slowapi")
+```
+
+**2. JWT 函數修改（約 741-819 行）**：
+- `generate_access_token()`：使用 PyJWT 庫生成標準 JWT token
+- `verify_access_token()`：使用 PyJWT 庫驗證 token，修復安全漏洞
+
+**3. BYOK 金鑰管理修改（約 54-75 行）**：
+- `get_encryption_key()`：強制要求環境變數，驗證金鑰格式
+- `get_cipher()`：優化錯誤處理，不影響應用啟動
+
+**4. Rate Limiting 設定（約 1450-1456 行）**：
+- 在 `create_app()` 中初始化 Rate Limiter
+- 為 BYOK API 端點添加速率限制裝飾器
+
+#### 📦 依賴更新
+**新增依賴**（可選，建議安裝）：
+```bash
+pip install PyJWT>=2.8.0
+pip install slowapi>=0.1.9
+```
+
+**環境變數要求**（生產環境必須設定）：
+```bash
+# BYOK 加密金鑰（必須設定）
+LLM_KEY_ENCRYPTION_KEY=<32字節的base64編碼Fernet金鑰>
+
+# 生成金鑰的方法：
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+#### ✅ 兼容性保證
+- **前端兼容**：JWT token 格式與前端完全兼容，無需修改前端代碼
+- **向後兼容**：如果依賴未安裝，系統會回退到舊實現並顯示警告
+- **部署安全**：優化錯誤處理，確保環境變數未設定時不會導致應用崩潰
+
+#### 🔍 測試建議
+1. **JWT 測試**：登入功能應正常運作，token 格式與前端兼容
+2. **BYOK 測試**：確保 `LLM_KEY_ENCRYPTION_KEY` 已正確設定
+3. **Rate Limiting 測試**：快速發送多個請求，應看到 429 錯誤
+
+---
+
 ### 2025-11-04 - BYOK (Bring Your Own Key) 功能實作
 
 #### 🚀 新增功能

@@ -6,9 +6,28 @@ import secrets
 import asyncio
 import time
 import uuid
+import base64
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Iterable, TYPE_CHECKING
 from urllib.parse import urlparse
+
+# JWT 支援
+try:
+    import jwt
+    JWT_AVAILABLE = True
+except ImportError:
+    JWT_AVAILABLE = False
+    print("WARNING: PyJWT 未安裝，將使用舊的 JWT 實現。請執行: pip install PyJWT")
+
+# Rate Limiting 支援
+try:
+    from slowapi import Limiter, _rate_limit_exceeded_handler
+    from slowapi.util import get_remote_address
+    from slowapi.errors import RateLimitExceeded
+    SLOWAPI_AVAILABLE = True
+except ImportError:
+    SLOWAPI_AVAILABLE = False
+    print("WARNING: slowapi 未安裝，Rate Limiting 功能將無法使用。請執行: pip install slowapi")
 
 # BYOK 加密支援
 if TYPE_CHECKING:
@@ -33,19 +52,27 @@ def get_taiwan_time():
 # ===== BYOK 加密功能 =====
 
 def get_encryption_key() -> Optional[bytes]:
-    """獲取加密金鑰（從環境變數或生成）"""
+    """獲取加密金鑰（從環境變數或生成）
+    
+    生產環境必須設定 LLM_KEY_ENCRYPTION_KEY 環境變數。
+    金鑰必須是 32 字節的 base64 編碼字串（Fernet 格式）。
+    """
     if not CRYPTOGRAPHY_AVAILABLE:
         return None
     
     encryption_key_str = os.getenv("LLM_KEY_ENCRYPTION_KEY")
-    if encryption_key_str:
-        return encryption_key_str.encode()
+    if not encryption_key_str:
+        # 生產環境必須設定，否則拋出錯誤
+        raise ValueError("LLM_KEY_ENCRYPTION_KEY 環境變數未設定，生產環境必須設定")
     
-    # 如果沒有設定，生成一個（僅用於開發，生產環境應該設定）
-    if Fernet is None:
-        return None
-    print("WARNING: LLM_KEY_ENCRYPTION_KEY 未設定，使用臨時金鑰（生產環境請設定）")
-    return Fernet.generate_key()
+    # 驗證金鑰格式（Fernet 金鑰必須是 32 字節的 base64 編碼）
+    try:
+        key_bytes = base64.urlsafe_b64decode(encryption_key_str)
+        if len(key_bytes) != 32:
+            raise ValueError("LLM_KEY_ENCRYPTION_KEY 格式錯誤，必須是 32 字節的 base64 編碼")
+        return encryption_key_str.encode()
+    except Exception as e:
+        raise ValueError(f"LLM_KEY_ENCRYPTION_KEY 格式錯誤: {e}")
 
 
 def get_cipher() -> Optional["Fernet"]:
@@ -53,14 +80,19 @@ def get_cipher() -> Optional["Fernet"]:
     if not CRYPTOGRAPHY_AVAILABLE or Fernet is None:
         return None
     
-    key = get_encryption_key()
-    if not key:
-        return None
-    
     try:
-        return Fernet(key)
-    except Exception as e:
-        print(f"ERROR: 創建加密器失敗: {e}")
+        key = get_encryption_key()
+        if not key:
+            return None
+        
+        try:
+            return Fernet(key)
+        except Exception as e:
+            print(f"ERROR: 創建加密器失敗: {e}")
+            return None
+    except ValueError as e:
+        # 環境變數未設定或格式錯誤，但不影響應用啟動
+        print(f"WARNING: {e}")
         return None
 
 
@@ -712,64 +744,84 @@ def generate_user_id(email: str) -> str:
 
 
 def generate_access_token(user_id: str) -> str:
-    """生成訪問令牌"""
-    payload = {
-        "user_id": user_id,
-        "exp": get_taiwan_time().timestamp() + 86400  # 24小時過期
-    }
-    # 簡單的 JWT 實現（生產環境建議使用 PyJWT）
-    import base64
-    import json
-    header = {"alg": "HS256", "typ": "JWT"}
-    encoded_header = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip('=')
-    encoded_payload = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip('=')
-    signature = hashlib.sha256(f"{encoded_header}.{encoded_payload}.{JWT_SECRET}".encode()).hexdigest()
-    return f"{encoded_header}.{encoded_payload}.{signature}"
+    """生成訪問令牌（使用標準 PyJWT 庫）"""
+    if JWT_AVAILABLE:
+        # 使用標準 PyJWT 庫
+        payload = {
+            "user_id": user_id,
+            "exp": get_taiwan_time().timestamp() + 86400  # 24小時過期
+        }
+        return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+    else:
+        # 回退到舊的實現（不建議，但保持向後兼容）
+        payload = {
+            "user_id": user_id,
+            "exp": get_taiwan_time().timestamp() + 86400  # 24小時過期
+        }
+        import json
+        header = {"alg": "HS256", "typ": "JWT"}
+        encoded_header = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip('=')
+        encoded_payload = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip('=')
+        signature = hashlib.sha256(f"{encoded_header}.{encoded_payload}.{JWT_SECRET}".encode()).hexdigest()
+        return f"{encoded_header}.{encoded_payload}.{signature}"
 
 
 def verify_access_token(token: str, allow_expired: bool = False) -> Optional[str]:
-    """驗證訪問令牌並返回用戶 ID
+    """驗證訪問令牌並返回用戶 ID（使用標準 PyJWT 庫）
     
     Args:
         token: JWT token
         allow_expired: 如果為 True，允許過期的 token（用於 refresh 場景）
     """
-    try:
-        import base64
-        import json
-        parts = token.split('.')
-        if len(parts) != 3:
-            print(f"DEBUG: verify_access_token - token 格式錯誤（不是3部分），allow_expired={allow_expired}")
+    if JWT_AVAILABLE:
+        # 使用標準 PyJWT 庫
+        try:
+            options = {"verify_exp": not allow_expired}
+            payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"], options=options)
+            return payload.get("user_id")
+        except jwt.ExpiredSignatureError:
+            if allow_expired:
+                # 如果允許過期，嘗試解碼但不驗證過期時間
+                try:
+                    payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"], options={"verify_exp": False})
+                    return payload.get("user_id")
+                except jwt.InvalidTokenError:
+                    return None
             return None
-        
-        # 驗證簽名
-        expected_signature = hashlib.sha256(f"{parts[0]}.{parts[1]}.{JWT_SECRET}".encode()).hexdigest()
-        if expected_signature != parts[2]:
-            print(f"DEBUG: verify_access_token - 簽名驗證失敗，allow_expired={allow_expired}")
-            print(f"DEBUG: JWT_SECRET 是否設定: {JWT_SECRET is not None and JWT_SECRET != ''}")
+        except jwt.InvalidTokenError:
             return None
-        
-        # 解碼 payload
-        payload = json.loads(base64.urlsafe_b64decode(parts[1] + '==').decode())
-        
-        # 檢查過期時間（如果 allow_expired=False）
-        if not allow_expired:
-            exp = payload.get("exp", 0)
-            now = get_taiwan_time().timestamp()
-            if exp < now:
-                print(f"DEBUG: verify_access_token - token 已過期，exp={exp}, now={now}, allow_expired={allow_expired}")
+    else:
+        # 回退到舊的實現（不建議，但保持向後兼容）
+        try:
+            import json
+            parts = token.split('.')
+            if len(parts) != 3:
                 return None
-        
-        user_id = payload.get("user_id")
-        if allow_expired:
-            exp = payload.get("exp", 0)
-            now = get_taiwan_time().timestamp()
-            is_expired = exp < now
-            print(f"DEBUG: verify_access_token - 驗證成功，user_id={user_id}, 已過期={is_expired}, allow_expired={allow_expired}")
-        return user_id
-    except Exception as e:
-        print(f"DEBUG: verify_access_token - 發生異常: {str(e)}, allow_expired={allow_expired}")
-        return None
+            
+            # 驗證簽名
+            expected_signature = hashlib.sha256(f"{parts[0]}.{parts[1]}.{JWT_SECRET}".encode()).hexdigest()
+            if expected_signature != parts[2]:
+                return None
+            
+            # 解碼 payload（處理 base64 填充）
+            payload_str = parts[1]
+            # 添加必要的填充
+            padding = 4 - len(payload_str) % 4
+            if padding != 4:
+                payload_str += '=' * padding
+            
+            payload = json.loads(base64.urlsafe_b64decode(payload_str).decode())
+            
+            # 檢查過期時間（如果 allow_expired=False）
+            if not allow_expired:
+                exp = payload.get("exp", 0)
+                now = get_taiwan_time().timestamp()
+                if exp < now:
+                    return None
+            
+            return payload.get("user_id")
+        except Exception as e:
+            return None
 
 
 async def get_google_user_info(access_token: str) -> Optional[GoogleUser]:
@@ -1399,6 +1451,14 @@ def create_app() -> FastAPI:
     print(f"INFO: Database initialized at: {db_path}")
 
     app = FastAPI()
+
+    # Rate Limiting 設定
+    if SLOWAPI_AVAILABLE:
+        limiter = Limiter(key_func=get_remote_address)
+        app.state.limiter = limiter
+        app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    else:
+        limiter = None
 
     # CORS for local file or dev servers
     frontend_url = os.getenv("FRONTEND_URL")
@@ -6687,9 +6747,17 @@ def create_app() -> FastAPI:
 
     # ===== BYOK (Bring Your Own Key) API 端點 =====
     
+    # 定義 Rate Limiting 裝飾器（如果可用）
+    def rate_limit(limit_str: str):
+        """Rate Limiting 裝飾器（如果 slowapi 可用）"""
+        if SLOWAPI_AVAILABLE and limiter:
+            return limiter.limit(limit_str)
+        return lambda f: f  # 如果不可用，返回無操作裝飾器
+    
     @app.post("/api/user/llm-keys")
+    @rate_limit("5/minute")
     async def save_llm_key(request: Request, current_user_id: Optional[str] = Depends(get_current_user)):
-        """保存用戶的 LLM API Key"""
+        """保存用戶的 LLM API Key（Rate Limit: 5/分鐘）"""
         if not current_user_id:
             return JSONResponse({"error": "請先登入"}, status_code=401)
         
@@ -6801,8 +6869,9 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": f"獲取失敗: {str(e)}"}, status_code=500)
     
     @app.post("/api/user/llm-keys/test")
+    @rate_limit("3/minute")
     async def test_llm_key(request: Request, current_user_id: Optional[str] = Depends(get_current_user)):
-        """測試 API Key 是否有效（不保存）"""
+        """測試 API Key 是否有效（不保存）（Rate Limit: 3/分鐘）"""
         if not current_user_id:
             return JSONResponse({"error": "請先登入"}, status_code=401)
         
