@@ -7243,17 +7243,54 @@ def create_app() -> FastAPI:
                     VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """, (current_user_id, plan_type, 1, license_expire_dt.timestamp(), "active", channel))
             
-            # 更新用戶訂閱狀態
+            # 更新或創建用戶訂閱狀態（確保用戶記錄存在）
+            # 先檢查用戶是否存在，如果不存在則創建，如果存在則更新訂閱狀態
             if use_postgresql:
+                # 先檢查用戶是否存在
                 cursor.execute(
-                    "UPDATE user_auth SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s",
+                    "SELECT user_id FROM user_auth WHERE user_id = %s",
                     (current_user_id,)
                 )
+                user_exists = cursor.fetchone()
+                
+                if not user_exists:
+                    # 用戶不存在，創建用戶記錄（從 license_activations 獲取 email）
+                    cursor.execute("""
+                        INSERT INTO user_auth 
+                        (user_id, email, is_subscribed, created_at, updated_at)
+                        VALUES (%s, %s, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """, (current_user_id, email))
+                    logger.info(f"授權驗證時創建新用戶記錄: user_id={current_user_id}, email={email}")
+                else:
+                    # 用戶存在，更新訂閱狀態
+                    cursor.execute(
+                        "UPDATE user_auth SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s",
+                        (current_user_id,)
+                    )
+                    logger.info(f"授權驗證時更新用戶訂閱狀態: user_id={current_user_id}")
             else:
+                # 先檢查用戶是否存在
                 cursor.execute(
-                    "UPDATE user_auth SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                    "SELECT user_id FROM user_auth WHERE user_id = ?",
                     (current_user_id,)
                 )
+                user_exists = cursor.fetchone()
+                
+                if not user_exists:
+                    # 用戶不存在，創建用戶記錄（從 license_activations 獲取 email）
+                    cursor.execute("""
+                        INSERT INTO user_auth 
+                        (user_id, email, is_subscribed, created_at, updated_at)
+                        VALUES (?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """, (current_user_id, email))
+                    logger.info(f"授權驗證時創建新用戶記錄: user_id={current_user_id}, email={email}")
+                else:
+                    # 用戶存在，更新訂閱狀態
+                    cursor.execute(
+                        "UPDATE user_auth SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                        (current_user_id,)
+                    )
+                    logger.info(f"授權驗證時更新用戶訂閱狀態: user_id={current_user_id}")
             
             # 自動建立 orders 記錄（讓後台管理系統可以看到購買記錄）
             try:
@@ -8590,8 +8627,10 @@ def create_app() -> FastAPI:
                 cursor.execute("""
                     SELECT o.id, o.user_id, o.order_id, o.plan_type, o.amount, 
                            o.currency, o.payment_method, o.payment_status, 
-                           o.paid_at, o.expires_at, o.invoice_number, o.created_at,
-                           ua.name, ua.email
+                           o.paid_at, o.expires_at, o.invoice_number, 
+                           o.invoice_type, o.vat_number, o.name, o.email, 
+                           o.phone, o.note, o.created_at,
+                           ua.name as user_name, ua.email as user_email
                     FROM orders o
                     LEFT JOIN user_auth ua ON o.user_id = ua.user_id
                     ORDER BY o.created_at DESC
@@ -8601,8 +8640,10 @@ def create_app() -> FastAPI:
                 cursor.execute("""
                     SELECT o.id, o.user_id, o.order_id, o.plan_type, o.amount, 
                            o.currency, o.payment_method, o.payment_status, 
-                           o.paid_at, o.expires_at, o.invoice_number, o.created_at,
-                           ua.name, ua.email
+                           o.paid_at, o.expires_at, o.invoice_number, 
+                           o.invoice_type, o.vat_number, o.name, o.email, 
+                           o.phone, o.note, o.created_at,
+                           ua.name as user_name, ua.email as user_email
                     FROM orders o
                     LEFT JOIN user_auth ua ON o.user_id = ua.user_id
                     ORDER BY o.created_at DESC
@@ -8611,17 +8652,31 @@ def create_app() -> FastAPI:
             
             orders = []
             for row in cursor.fetchall():
+                # 處理日期時間（PostgreSQL 返回 datetime 對象，SQLite 返回 timestamp）
+                paid_at = None
+                expires_at = None
+                created_at = None
+                
+                if use_postgresql:
+                    paid_at = row[8].isoformat() if row[8] else None
+                    expires_at = row[9].isoformat() if row[9] else None
+                    created_at = row[17].isoformat() if row[17] else None
+                else:
+                    paid_at = datetime.fromtimestamp(row[8]).isoformat() if row[8] else None
+                    expires_at = datetime.fromtimestamp(row[9]).isoformat() if row[9] else None
+                    created_at = datetime.fromtimestamp(row[17]).isoformat() if row[17] else None
+                
                 orders.append({
                     "id": row[0],
                     "user_id": row[1],
                     "order_id": row[2],
                     "plan_type": row[3],
                     "amount": row[4],
-                    "currency": row[5],
+                    "currency": row[5] or "TWD",
                     "payment_method": row[6],
-                    "payment_status": row[7],
-                    "paid_at": str(row[8]) if row[8] else None,
-                    "expires_at": str(row[9]) if row[9] else None,
+                    "payment_status": row[7] or "pending",
+                    "paid_at": paid_at,
+                    "expires_at": expires_at,
                     "invoice_number": row[10],
                     "invoice_type": row[11],
                     "vat_number": row[12],
@@ -8629,15 +8684,19 @@ def create_app() -> FastAPI:
                     "email": row[14],  # 訂單填寫的 Email
                     "phone": row[15],  # 訂單填寫的手機
                     "note": row[16],  # 備註
-                    "created_at": str(row[17]) if row[17] else None,
+                    "created_at": created_at,
                     "user_name": row[18] or "未知用戶",  # 用戶帳號的姓名
                     "user_email": row[19] or ""  # 用戶帳號的 Email
                 })
             
+            cursor.close()
             conn.close()
             return {"orders": orders}
         except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+            logger.error(f"獲取訂單記錄失敗: {e}", exc_info=True)
+            if conn:
+                conn.close()
+            return JSONResponse({"error": f"獲取訂單記錄失敗: {str(e)}"}, status_code=500)
 
     # ===== BYOK (Bring Your Own Key) API 端點 =====
     
