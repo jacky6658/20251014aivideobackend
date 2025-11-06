@@ -10,12 +10,117 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Iterable
 from urllib.parse import urlparse
 
+# BYOK 加密支援
+try:
+    from cryptography.fernet import Fernet
+    CRYPTOGRAPHY_AVAILABLE = True
+except ImportError:
+    CRYPTOGRAPHY_AVAILABLE = False
+    print("WARNING: cryptography 未安裝，BYOK 功能將無法使用。請執行: pip install cryptography")
+
 # 台灣時區 (GMT+8)
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
 def get_taiwan_time():
     """獲取台灣時區的當前時間"""
     return datetime.now(TAIWAN_TZ)
+
+
+# ===== BYOK 加密功能 =====
+
+def get_encryption_key() -> Optional[bytes]:
+    """獲取加密金鑰（從環境變數或生成）"""
+    if not CRYPTOGRAPHY_AVAILABLE:
+        return None
+    
+    encryption_key_str = os.getenv("LLM_KEY_ENCRYPTION_KEY")
+    if encryption_key_str:
+        return encryption_key_str.encode()
+    
+    # 如果沒有設定，生成一個（僅用於開發，生產環境應該設定）
+    print("WARNING: LLM_KEY_ENCRYPTION_KEY 未設定，使用臨時金鑰（生產環境請設定）")
+    return Fernet.generate_key()
+
+
+def get_cipher() -> Optional[Fernet]:
+    """獲取加密器"""
+    if not CRYPTOGRAPHY_AVAILABLE:
+        return None
+    
+    key = get_encryption_key()
+    if not key:
+        return None
+    
+    try:
+        return Fernet(key)
+    except Exception as e:
+        print(f"ERROR: 創建加密器失敗: {e}")
+        return None
+
+
+def encrypt_api_key(api_key: str) -> Optional[str]:
+    """加密 API Key"""
+    cipher = get_cipher()
+    if not cipher:
+        raise ValueError("加密功能不可用，請安裝 cryptography 並設定 LLM_KEY_ENCRYPTION_KEY")
+    
+    try:
+        encrypted = cipher.encrypt(api_key.encode())
+        return encrypted.decode()
+    except Exception as e:
+        print(f"ERROR: 加密 API Key 失敗: {e}")
+        raise
+
+
+def decrypt_api_key(encrypted_key: str) -> Optional[str]:
+    """解密 API Key"""
+    cipher = get_cipher()
+    if not cipher:
+        raise ValueError("加密功能不可用")
+    
+    try:
+        decrypted = cipher.decrypt(encrypted_key.encode())
+        return decrypted.decode()
+    except Exception as e:
+        print(f"ERROR: 解密 API Key 失敗: {e}")
+        raise
+
+
+def get_user_llm_key(user_id: Optional[str], provider: str = "gemini") -> Optional[str]:
+    """獲取用戶的 LLM API Key（如果有的話）"""
+    if not CRYPTOGRAPHY_AVAILABLE or not user_id:
+        return None
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        database_url = os.getenv("DATABASE_URL")
+        use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+        
+        if use_postgresql:
+            cursor.execute(
+                "SELECT encrypted_key FROM user_llm_keys WHERE user_id = %s AND provider = %s",
+                (user_id, provider)
+            )
+        else:
+            cursor.execute(
+                "SELECT encrypted_key FROM user_llm_keys WHERE user_id = ? AND provider = ?",
+                (user_id, provider)
+            )
+        
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        if row:
+            encrypted_key = row[0]
+            return decrypt_api_key(encrypted_key)
+        
+        return None
+    except Exception as e:
+        print(f"ERROR: 獲取用戶 LLM Key 失敗: {e}")
+        return None
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -338,6 +443,21 @@ def init_database():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES user_profiles (user_id)
+        )
+    """)
+    
+    # 創建用戶 LLM API Key 表 (BYOK)
+    execute_sql("""
+        CREATE TABLE IF NOT EXISTS user_llm_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            encrypted_key TEXT NOT NULL,
+            last4 TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES user_profiles (user_id),
+            UNIQUE(user_id, provider)
         )
     """)
     
@@ -1354,7 +1474,14 @@ def create_app() -> FastAPI:
     @app.post("/api/generate/positioning")
     async def generate_positioning(body: ChatBody, request: Request):
         """一鍵生成帳號定位"""
-        if not os.getenv("GEMINI_API_KEY"):
+        # 檢查是否有用戶自定義的 API Key
+        user_id = getattr(body, 'user_id', None)
+        user_api_key = get_user_llm_key(user_id, "gemini") if user_id else None
+        
+        # 如果沒有用戶的 API Key，使用系統預設的
+        api_key = user_api_key or os.getenv("GEMINI_API_KEY")
+        
+        if not api_key:
             return JSONResponse({"error": "Missing GEMINI_API_KEY in .env"}, status_code=500)
 
         # 專門的帳號定位提示詞
@@ -1378,13 +1505,15 @@ def create_app() -> FastAPI:
 
         try:
             # 暫時使用原有的 stream_chat 端點
-            user_id = getattr(body, 'user_id', None)
             system_text = build_system_prompt(kb_text_cache, body.platform, body.profile, body.topic, body.style, body.duration, user_id)
             
             user_history: List[Dict[str, Any]] = []
             for m in body.history or []:
                 user_history.append({"role": m.get("role", "user"), "parts": [m.get("content", "")]})
 
+            # 使用用戶的 API Key 或系統預設的
+            genai.configure(api_key=api_key)
+            
             model_obj = genai.GenerativeModel(
                 model_name=model_name,
                 system_instruction=system_text
@@ -1413,7 +1542,14 @@ def create_app() -> FastAPI:
     @app.post("/api/generate/topics")
     async def generate_topics(body: ChatBody, request: Request):
         """一鍵生成選題推薦"""
-        if not os.getenv("GEMINI_API_KEY"):
+        # 檢查是否有用戶自定義的 API Key
+        user_id = getattr(body, 'user_id', None)
+        user_api_key = get_user_llm_key(user_id, "gemini") if user_id else None
+        
+        # 如果沒有用戶的 API Key，使用系統預設的
+        api_key = user_api_key or os.getenv("GEMINI_API_KEY")
+        
+        if not api_key:
             return JSONResponse({"error": "Missing GEMINI_API_KEY in .env"}, status_code=500)
 
         # 專門的選題推薦提示詞
@@ -1443,6 +1579,9 @@ def create_app() -> FastAPI:
             for m in body.history or []:
                 user_history.append({"role": m.get("role", "user"), "parts": [m.get("content", "")]})
 
+            # 使用用戶的 API Key 或系統預設的
+            genai.configure(api_key=api_key)
+            
             model_obj = genai.GenerativeModel(
                 model_name=model_name,
                 system_instruction=system_text
@@ -1470,7 +1609,14 @@ def create_app() -> FastAPI:
     @app.post("/api/generate/script")
     async def generate_script(body: ChatBody, request: Request):
         """一鍵生成腳本"""
-        if not os.getenv("GEMINI_API_KEY"):
+        # 檢查是否有用戶自定義的 API Key
+        user_id = getattr(body, 'user_id', None)
+        user_api_key = get_user_llm_key(user_id, "gemini") if user_id else None
+        
+        # 如果沒有用戶的 API Key，使用系統預設的
+        api_key = user_api_key or os.getenv("GEMINI_API_KEY")
+        
+        if not api_key:
             return JSONResponse({"error": "Missing GEMINI_API_KEY in .env"}, status_code=500)
 
         # 專門的腳本生成提示詞
@@ -1502,6 +1648,9 @@ def create_app() -> FastAPI:
             for m in body.history or []:
                 user_history.append({"role": m.get("role", "user"), "parts": [m.get("content", "")]})
 
+            # 使用用戶的 API Key 或系統預設的
+            genai.configure(api_key=api_key)
+            
             model_obj = genai.GenerativeModel(
                 model_name=model_name,
                 system_instruction=system_text
@@ -1528,10 +1677,16 @@ def create_app() -> FastAPI:
 
     @app.post("/api/chat/stream")
     async def stream_chat(body: ChatBody, request: Request):
-        if not os.getenv("GEMINI_API_KEY"):
-            return JSONResponse({"error": "Missing GEMINI_API_KEY in .env"}, status_code=500)
-
         user_id = getattr(body, 'user_id', None)
+        
+        # 檢查是否有用戶自定義的 API Key
+        user_api_key = get_user_llm_key(user_id, "gemini") if user_id else None
+        
+        # 如果沒有用戶的 API Key，使用系統預設的
+        api_key = user_api_key or os.getenv("GEMINI_API_KEY")
+        
+        if not api_key:
+            return JSONResponse({"error": "Missing GEMINI_API_KEY in .env"}, status_code=500)
         
         # === 整合記憶系統 ===
         # 1. 載入短期記憶（STM）- 最近對話上下文
@@ -1570,6 +1725,9 @@ def create_app() -> FastAPI:
                 elif m.role in ("assistant", "model"):
                     user_history.append({"role": "model", "parts": [m.content]})
 
+        # 使用用戶的 API Key 或系統預設的
+        genai.configure(api_key=api_key)
+        
         model = genai.GenerativeModel(model_name)
         chat = model.start_chat(history=[
             {"role": "user", "parts": system_text},
@@ -6520,6 +6678,207 @@ def create_app() -> FastAPI:
             return {"orders": orders}
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
+
+    # ===== BYOK (Bring Your Own Key) API 端點 =====
+    
+    @app.post("/api/user/llm-keys")
+    async def save_llm_key(request: Request, current_user_id: Optional[str] = Depends(get_current_user)):
+        """保存用戶的 LLM API Key"""
+        if not current_user_id:
+            return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        if not CRYPTOGRAPHY_AVAILABLE:
+            return JSONResponse({"error": "BYOK 功能不可用，請安裝 cryptography"}, status_code=500)
+        
+        try:
+            body = await request.json()
+            user_id = body.get("user_id")
+            provider = body.get("provider", "gemini")  # 'gemini' or 'openai'
+            api_key = body.get("api_key")
+            
+            if not user_id:
+                return JSONResponse({"error": "缺少 user_id"}, status_code=400)
+            
+            if user_id != current_user_id:
+                return JSONResponse({"error": "無權限訪問其他用戶的資料"}, status_code=403)
+            
+            if not api_key:
+                return JSONResponse({"error": "缺少 api_key"}, status_code=400)
+            
+            if provider not in ["gemini", "openai"]:
+                return JSONResponse({"error": "不支援的 provider，只支援 'gemini' 或 'openai'"}, status_code=400)
+            
+            # 加密 API Key
+            encrypted_key = encrypt_api_key(api_key)
+            
+            # 提取最後4位（用於顯示）
+            last4 = api_key[-4:] if len(api_key) >= 4 else "****"
+            
+            # 保存到資料庫（使用 INSERT OR REPLACE / ON CONFLICT）
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("""
+                    INSERT INTO user_llm_keys (user_id, provider, encrypted_key, last4, updated_at)
+                    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (user_id, provider) 
+                    DO UPDATE SET encrypted_key = EXCLUDED.encrypted_key, 
+                                  last4 = EXCLUDED.last4, 
+                                  updated_at = CURRENT_TIMESTAMP
+                """, (user_id, provider, encrypted_key, last4))
+            else:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO user_llm_keys 
+                    (user_id, provider, encrypted_key, last4, updated_at)
+                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (user_id, provider, encrypted_key, last4))
+            
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            return {"message": "API Key 已安全保存", "provider": provider, "last4": last4}
+        
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except Exception as e:
+            print(f"ERROR: 保存 LLM Key 失敗: {e}")
+            return JSONResponse({"error": f"保存失敗: {str(e)}"}, status_code=500)
+    
+    @app.get("/api/user/llm-keys/{user_id}")
+    async def get_llm_keys(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
+        """獲取用戶已保存的 LLM Keys（只返回 last4，不返回完整金鑰）"""
+        if not current_user_id:
+            return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        if user_id != current_user_id:
+            return JSONResponse({"error": "無權限訪問其他用戶的資料"}, status_code=403)
+        
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute(
+                    "SELECT provider, last4, created_at, updated_at FROM user_llm_keys WHERE user_id = %s",
+                    (user_id,)
+                )
+            else:
+                cursor.execute(
+                    "SELECT provider, last4, created_at, updated_at FROM user_llm_keys WHERE user_id = ?",
+                    (user_id,)
+                )
+            
+            keys = []
+            for row in cursor.fetchall():
+                keys.append({
+                    "provider": row[0],
+                    "last4": row[1],
+                    "created_at": row[2].isoformat() if row[2] else None,
+                    "updated_at": row[3].isoformat() if row[3] else None
+                })
+            
+            cursor.close()
+            conn.close()
+            
+            return {"keys": keys}
+        
+        except Exception as e:
+            print(f"ERROR: 獲取 LLM Keys 失敗: {e}")
+            return JSONResponse({"error": f"獲取失敗: {str(e)}"}, status_code=500)
+    
+    @app.post("/api/user/llm-keys/test")
+    async def test_llm_key(request: Request, current_user_id: Optional[str] = Depends(get_current_user)):
+        """測試 API Key 是否有效（不保存）"""
+        if not current_user_id:
+            return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        try:
+            body = await request.json()
+            provider = body.get("provider", "gemini")
+            api_key = body.get("api_key")
+            
+            if not api_key:
+                return JSONResponse({"error": "缺少 api_key"}, status_code=400)
+            
+            if provider == "gemini":
+                # 測試 Gemini API Key
+                try:
+                    import google.generativeai as genai
+                    genai.configure(api_key=api_key)
+                    model = genai.GenerativeModel("gemini-2.0-flash-exp")
+                    response = model.generate_content("test", request_options={"timeout": 5})
+                    return {"valid": True, "message": "Gemini API Key 有效"}
+                except Exception as e:
+                    return {"valid": False, "error": f"Gemini API Key 無效: {str(e)}"}
+            
+            elif provider == "openai":
+                # 測試 OpenAI API Key
+                try:
+                    import openai
+                    client = openai.OpenAI(api_key=api_key)
+                    response = client.models.list()
+                    return {"valid": True, "message": "OpenAI API Key 有效"}
+                except Exception as e:
+                    return {"valid": False, "error": f"OpenAI API Key 無效: {str(e)}"}
+            
+            else:
+                return JSONResponse({"error": "不支援的 provider"}, status_code=400)
+        
+        except Exception as e:
+            print(f"ERROR: 測試 LLM Key 失敗: {e}")
+            return JSONResponse({"error": f"測試失敗: {str(e)}"}, status_code=500)
+    
+    @app.delete("/api/user/llm-keys/{user_id}")
+    async def delete_llm_key(user_id: str, request: Request, current_user_id: Optional[str] = Depends(get_current_user)):
+        """刪除用戶的 LLM API Key"""
+        if not current_user_id:
+            return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        if user_id != current_user_id:
+            return JSONResponse({"error": "無權限訪問其他用戶的資料"}, status_code=403)
+        
+        try:
+            body = await request.json()
+            provider = body.get("provider", "gemini")
+            
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute(
+                    "DELETE FROM user_llm_keys WHERE user_id = %s AND provider = %s",
+                    (user_id, provider)
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM user_llm_keys WHERE user_id = ? AND provider = ?",
+                    (user_id, provider)
+                )
+            
+            deleted_count = cursor.rowcount
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            if deleted_count > 0:
+                return {"message": "API Key 已刪除", "provider": provider}
+            else:
+                return JSONResponse({"error": "找不到指定的 API Key"}, status_code=404)
+        
+        except Exception as e:
+            print(f"ERROR: 刪除 LLM Key 失敗: {e}")
+            return JSONResponse({"error": f"刪除失敗: {str(e)}"}, status_code=500)
 
     return app
 
