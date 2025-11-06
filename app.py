@@ -7,15 +7,19 @@ import asyncio
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any, Optional, Iterable
+from typing import List, Dict, Any, Optional, Iterable, TYPE_CHECKING
 from urllib.parse import urlparse
 
 # BYOK 加密支援
+if TYPE_CHECKING:
+    from cryptography.fernet import Fernet
+
 try:
     from cryptography.fernet import Fernet
     CRYPTOGRAPHY_AVAILABLE = True
 except ImportError:
     CRYPTOGRAPHY_AVAILABLE = False
+    Fernet = None  # 當未安裝時設為 None，避免類型提示錯誤
     print("WARNING: cryptography 未安裝，BYOK 功能將無法使用。請執行: pip install cryptography")
 
 # 台灣時區 (GMT+8)
@@ -38,13 +42,15 @@ def get_encryption_key() -> Optional[bytes]:
         return encryption_key_str.encode()
     
     # 如果沒有設定，生成一個（僅用於開發，生產環境應該設定）
+    if Fernet is None:
+        return None
     print("WARNING: LLM_KEY_ENCRYPTION_KEY 未設定，使用臨時金鑰（生產環境請設定）")
     return Fernet.generate_key()
 
 
-def get_cipher() -> Optional[Fernet]:
+def get_cipher() -> Optional["Fernet"]:
     """獲取加密器"""
-    if not CRYPTOGRAPHY_AVAILABLE:
+    if not CRYPTOGRAPHY_AVAILABLE or Fernet is None:
         return None
     
     key = get_encryption_key()
