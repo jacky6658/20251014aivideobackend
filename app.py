@@ -1983,8 +1983,16 @@ def create_app() -> FastAPI:
         limiter = Limiter(key_func=get_remote_address)
         app.state.limiter = limiter
         app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+        
+        def rate_limit(limit_str: str):
+            """Rate limiting 裝飾器"""
+            return limiter.limit(limit_str)
     else:
         limiter = None
+        
+        def rate_limit(limit_str: str):
+            """Rate limiting 裝飾器（未安裝 slowapi，返回空裝飾器）"""
+            return lambda f: f
 
     # CORS for local file or dev servers
     frontend_url = os.getenv("FRONTEND_URL")
@@ -2000,6 +2008,11 @@ def create_app() -> FastAPI:
     
     # 如果有設定前端 URL，嚴格驗證後加入 CORS 來源
     if frontend_url:
+        # 如果沒有協議前綴，自動添加 https://
+        if not frontend_url.startswith("http://") and not frontend_url.startswith("https://"):
+            frontend_url = f"https://{frontend_url}"
+            print(f"INFO: FRONTEND_URL 自動添加 https:// 前綴: {frontend_url}")
+        
         # 只允許 HTTPS（生產環境必須使用 HTTPS）
         if not frontend_url.startswith("https://"):
             # 開發環境允許 HTTP（localhost）
@@ -7736,13 +7749,6 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
 
     # ===== BYOK (Bring Your Own Key) API 端點 =====
-    
-    # 定義 Rate Limiting 裝飾器（如果可用）
-    def rate_limit(limit_str: str):
-        """Rate Limiting 裝飾器（如果 slowapi 可用）"""
-        if SLOWAPI_AVAILABLE and limiter:
-            return limiter.limit(limit_str)
-        return lambda f: f  # 如果不可用，返回無操作裝飾器
     
     @app.post("/api/user/llm-keys")
     @rate_limit("5/minute")
