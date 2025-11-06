@@ -118,12 +118,30 @@ def decrypt_api_key(encrypted_key: str) -> Optional[str]:
         return None
     
     try:
+        # 檢查輸入格式
+        if not encrypted_key or not isinstance(encrypted_key, str):
+            print(f"ERROR: 解密 API Key 失敗 - 輸入格式錯誤: {type(encrypted_key)}, 長度: {len(encrypted_key) if encrypted_key else 0}")
+            return None
+        
+        # 檢查是否為有效的 base64 格式（Fernet 加密後的格式）
+        try:
+            import base64
+            # 嘗試解碼 base64（不驗證內容，只檢查格式）
+            base64.urlsafe_b64decode(encrypted_key + '==')  # 添加填充嘗試解碼
+        except Exception as base64_error:
+            print(f"ERROR: 解密 API Key 失敗 - 不是有效的 base64 格式: {str(base64_error)}")
+            print(f"DEBUG: encrypted_key 前50個字符: {encrypted_key[:50] if len(encrypted_key) > 50 else encrypted_key}")
+            return None
+        
+        # 嘗試解密
         decrypted = cipher.decrypt(encrypted_key.encode())
         return decrypted.decode()
     except Exception as e:
         error_msg = str(e) if e else "未知錯誤"
         error_type = type(e).__name__
         print(f"ERROR: 解密 API Key 失敗 - 類型: {error_type}, 訊息: {error_msg}")
+        print(f"DEBUG: encrypted_key 長度: {len(encrypted_key) if encrypted_key else 0}")
+        print(f"DEBUG: encrypted_key 前50個字符: {encrypted_key[:50] if encrypted_key and len(encrypted_key) > 50 else encrypted_key}")
         # 不拋出異常，返回 None（因為這是可選功能，不應該中斷主流程）
         # 可能是舊金鑰加密的數據，無法用新金鑰解密
         return None
