@@ -434,6 +434,302 @@ A: 檢查：
 
 ## 更新日誌
 
+### 2025-11-04 - BYOK (Bring Your Own Key) 功能實作
+
+#### 🚀 新增功能
+- **BYOK 功能**：允許用戶使用自己的 LLM API Key
+- **加密存儲**：使用 Fernet 對稱加密安全存儲 API Key
+- **多提供商支援**：支援 Google Gemini 和 OpenAI
+- **自動優先使用**：所有 LLM 呼叫自動優先使用用戶的 API Key
+- **完整 API 端點**：4 個完整的 API 端點用於管理用戶的 API Key
+
+#### 🛠️ 技術修改
+**檔案：app.py**
+
+**1. 導入加密庫（約 13-19 行）**：
+```python
+try:
+    from cryptography.fernet import Fernet
+    CRYPTOGRAPHY_AVAILABLE = True
+except ImportError:
+    CRYPTOGRAPHY_AVAILABLE = False
+```
+
+**2. 加密功能實作（約 29-123 行）**：
+- `get_encryption_key()`：獲取加密金鑰（從環境變數或生成）
+- `get_cipher()`：獲取 Fernet 加密器
+- `encrypt_api_key()`：加密 API Key
+- `decrypt_api_key()`：解密 API Key
+- `get_user_llm_key()`：獲取用戶的 LLM API Key（如果有的話）
+
+**3. 資料庫表結構（約 352-365 行）**：
+```sql
+CREATE TABLE IF NOT EXISTS user_llm_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    encrypted_key TEXT NOT NULL,
+    last4 TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES user_profiles (user_id),
+    UNIQUE(user_id, provider)
+)
+```
+
+**4. API 端點實作（約 6641-6840 行）**：
+- `POST /api/user/llm-keys` - 保存 API Key
+- `GET /api/user/llm-keys/{user_id}` - 獲取已保存的金鑰資訊
+- `POST /api/user/llm-keys/test` - 測試 API Key 是否有效
+- `DELETE /api/user/llm-keys/{user_id}` - 清除 API Key
+
+**5. LLM 呼叫邏輯整合**：
+- 修改 `/api/generate/positioning`：優先使用用戶的 API Key
+- 修改 `/api/generate/topics`：優先使用用戶的 API Key
+- 修改 `/api/generate/script`：優先使用用戶的 API Key
+- 修改 `/api/chat/stream`：優先使用用戶的 API Key
+
+#### 🔐 安全性措施
+1. **加密存儲**：
+   - 使用 Fernet 對稱加密（AES-128）
+   - 加密金鑰從環境變數 `LLM_KEY_ENCRYPTION_KEY` 讀取
+   - 如果未設定，會生成臨時金鑰（僅用於開發）
+
+2. **權限控制**：
+   - 所有 API 端點都需要 JWT token 驗證
+   - 用戶只能訪問自己的 API Key
+   - 使用 `get_current_user` 依賴項驗證用戶身份
+
+3. **最小化暴露**：
+   - GET API 只返回最後4位數字，不返回完整金鑰
+   - 完整金鑰只在後端內部使用，不會傳遞到前端
+
+4. **HTTPS 傳輸**：
+   - 所有 API 請求都應該通過 HTTPS 傳輸
+   - 確保 API Key 在傳輸過程中的安全性
+
+#### 📊 BYOK 運作方式
+
+**1. 用戶設定 API Key**：
+```
+用戶輸入 API Key
+  ↓
+前端發送 POST /api/user/llm-keys
+  ↓
+後端驗證用戶身份
+  ↓
+後端加密 API Key（使用 Fernet）
+  ↓
+後端保存到 user_llm_keys 表
+  ↓
+返回成功訊息（包含最後4位）
+```
+
+**2. AI 生成時自動使用**：
+```
+用戶發起 AI 生成請求
+  ↓
+後端檢查是否有用戶的 API Key
+  ↓
+如果有 → 使用用戶的 API Key
+如果沒有 → 使用系統預設的 GEMINI_API_KEY
+  ↓
+調用 LLM API（Gemini 或 OpenAI）
+  ↓
+返回生成結果
+```
+
+**3. 優先級邏輯**：
+```python
+# 檢查是否有用戶自定義的 API Key
+user_id = getattr(body, 'user_id', None)
+user_api_key = get_user_llm_key(user_id, "gemini") if user_id else None
+
+# 如果沒有用戶的 API Key，使用系統預設的
+api_key = user_api_key or os.getenv("GEMINI_API_KEY")
+
+# 使用 API Key 配置 LLM
+genai.configure(api_key=api_key)
+```
+
+#### 🔧 環境變數設定
+
+**必要環境變數**：
+```bash
+# BYOK 加密金鑰（必須設定！）
+LLM_KEY_ENCRYPTION_KEY=your_base64_encoded_fernet_key_here
+
+# 生成加密金鑰的方法：
+# python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+**系統預設 API Key（如果用戶沒有設定）**：
+```bash
+GEMINI_API_KEY=your_gemini_api_key
+```
+
+#### 📦 依賴套件
+
+**新增依賴**：
+```bash
+pip install cryptography
+```
+
+**requirements.txt 更新**：
+```
+cryptography>=41.0.0
+```
+
+#### 🎯 API 端點詳情
+
+**1. POST `/api/user/llm-keys` - 保存 API Key**：
+```json
+// Request
+{
+  "user_id": "user123",
+  "provider": "gemini",  // 或 "openai"
+  "api_key": "AIzaSy..."
+}
+
+// Response
+{
+  "message": "API Key 已安全保存",
+  "provider": "gemini",
+  "last4": "TR4"
+}
+```
+
+**2. GET `/api/user/llm-keys/{user_id}` - 獲取已保存的金鑰**：
+```json
+// Response
+{
+  "keys": [
+    {
+      "provider": "gemini",
+      "last4": "TR4",
+      "created_at": "2025-11-04T10:00:00",
+      "updated_at": "2025-11-04T10:00:00"
+    }
+  ]
+}
+```
+
+**3. POST `/api/user/llm-keys/test` - 測試 API Key**：
+```json
+// Request
+{
+  "provider": "gemini",
+  "api_key": "AIzaSy..."
+}
+
+// Response (成功)
+{
+  "valid": true,
+  "message": "Gemini API Key 有效"
+}
+
+// Response (失敗)
+{
+  "valid": false,
+  "error": "Gemini API Key 無效: ..."
+}
+```
+
+**4. DELETE `/api/user/llm-keys/{user_id}` - 清除 API Key**：
+```json
+// Request
+{
+  "provider": "gemini"
+}
+
+// Response
+{
+  "message": "API Key 已刪除",
+  "provider": "gemini"
+}
+```
+
+#### 🎯 測試結果
+所有功能已驗證正常：
+- ✅ **資料庫表創建**：`user_llm_keys` 表正確創建
+- ✅ **加密功能**：API Key 正確加密和解密
+- ✅ **保存 API Key**：成功保存到資料庫並加密存儲
+- ✅ **獲取 API Key**：正確返回最後4位，不暴露完整金鑰
+- ✅ **測試 API Key**：正確驗證 Gemini 和 OpenAI API Key
+- ✅ **清除 API Key**：成功刪除用戶的 API Key
+- ✅ **自動使用**：所有 LLM 呼叫優先使用用戶的 API Key
+- ✅ **權限控制**：用戶只能訪問自己的 API Key
+
+#### 📝 重要注意事項
+
+1. **加密金鑰設定**：
+   - 必須在環境變數中設定 `LLM_KEY_ENCRYPTION_KEY`
+   - 使用 Fernet 生成的 base64 編碼金鑰
+   - 生產環境必須使用固定金鑰，不要使用臨時生成的金鑰
+
+2. **資料庫相容性**：
+   - 支援 SQLite 和 PostgreSQL
+   - 自動處理 SQL 語法差異
+   - 使用 `ON CONFLICT` 或 `INSERT OR REPLACE` 處理重複
+
+3. **錯誤處理**：
+   - 如果 `cryptography` 未安裝，BYOK 功能會自動禁用
+   - 如果加密金鑰未設定，會生成臨時金鑰並顯示警告
+   - 所有錯誤都有詳細的日誌記錄
+
+4. **向後兼容**：
+   - 如果用戶沒有設定自己的 API Key，系統會自動使用系統預設的 API Key
+   - 不會影響現有功能的正常運作
+
+#### 🔄 與前端整合
+
+**前端負責**：
+- UI/UX 設計和用戶交互
+- API Key 輸入和顯示
+- 調用後端 API 保存、測試、清除 API Key
+
+**後端負責**：
+- API Key 加密存儲
+- 權限驗證和安全控制
+- LLM 呼叫時自動使用用戶的 API Key
+- 提供完整的 CRUD API 端點
+
+#### 🚀 部署步驟
+
+1. **安裝依賴**：
+   ```bash
+   pip install cryptography
+   ```
+
+2. **生成加密金鑰**：
+   ```bash
+   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+   ```
+
+3. **設定環境變數**：
+   ```bash
+   LLM_KEY_ENCRYPTION_KEY=<生成的加密金鑰>
+   ```
+
+4. **重新部署**：
+   - 確保所有新的 API 端點都已部署
+   - 確保資料庫表已創建
+   - 測試所有功能
+
+#### 📊 資料庫結構
+
+**user_llm_keys 表**：
+- `id`：主鍵，自動遞增
+- `user_id`：用戶 ID（外鍵）
+- `provider`：提供商（'gemini' 或 'openai'）
+- `encrypted_key`：加密後的 API Key
+- `last4`：最後4位數字（用於顯示）
+- `created_at`：創建時間
+- `updated_at`：更新時間
+- `UNIQUE(user_id, provider)`：確保每個用戶每個提供商只有一個金鑰
+
+---
+
 ### 2025-11-04 - 長期記憶系統完整支援
 
 #### ✅ 系統狀態確認
