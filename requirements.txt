@@ -6,4 +6,5 @@ typing-extensions
 httpx
 psycopg2-binary
 packaging
+cryptography>=41.0.0
 
