@@ -114,14 +114,19 @@ def decrypt_api_key(encrypted_key: str) -> Optional[str]:
     """解密 API Key"""
     cipher = get_cipher()
     if not cipher:
-        raise ValueError("加密功能不可用")
+        print("WARNING: 加密功能不可用，無法解密 API Key")
+        return None
     
     try:
         decrypted = cipher.decrypt(encrypted_key.encode())
         return decrypted.decode()
     except Exception as e:
-        print(f"ERROR: 解密 API Key 失敗: {e}")
-        raise
+        error_msg = str(e) if e else "未知錯誤"
+        error_type = type(e).__name__
+        print(f"ERROR: 解密 API Key 失敗 - 類型: {error_type}, 訊息: {error_msg}")
+        # 不拋出異常，返回 None（因為這是可選功能，不應該中斷主流程）
+        # 可能是舊金鑰加密的數據，無法用新金鑰解密
+        return None
 
 
 def get_user_llm_key(user_id: Optional[str], provider: str = "gemini") -> Optional[str]:
@@ -153,11 +158,22 @@ def get_user_llm_key(user_id: Optional[str], provider: str = "gemini") -> Option
         
         if row:
             encrypted_key = row[0]
-            return decrypt_api_key(encrypted_key)
+            if encrypted_key:
+                decrypted_key = decrypt_api_key(encrypted_key)
+                if decrypted_key:
+                    return decrypted_key
+                else:
+                    # 解密失敗（可能是舊金鑰加密的數據）
+                    print(f"WARNING: 無法解密用戶 {user_id} 的 {provider} API Key，可能是使用舊金鑰加密的數據")
+                    return None
+            else:
+                return None
         
         return None
     except Exception as e:
-        print(f"ERROR: 獲取用戶 LLM Key 失敗: {e}")
+        error_msg = str(e) if e else "未知錯誤"
+        error_type = type(e).__name__
+        print(f"ERROR: 獲取用戶 LLM Key 失敗 - 類型: {error_type}, 訊息: {error_msg}")
         return None
 
 from fastapi import FastAPI, Request, HTTPException, Depends
