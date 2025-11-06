@@ -2101,6 +2101,7 @@ def create_app() -> FastAPI:
             }
 
     @app.post("/api/generate/positioning")
+    @rate_limit("10/minute")
     async def generate_positioning(body: ChatBody, request: Request):
         """一鍵生成帳號定位"""
         # 檢查是否有用戶自定義的 API Key
@@ -5187,7 +5188,7 @@ def create_app() -> FastAPI:
     
     @app.get("/api/admin/export/{export_type}")
     @rate_limit("10/minute")
-    async def export_csv(export_type: str, admin_user: str = Depends(get_admin_user)):
+    async def export_csv(export_type: str, request: Request, admin_user: str = Depends(get_admin_user)):
         """匯出 CSV 檔案"""
         import csv
         import io
