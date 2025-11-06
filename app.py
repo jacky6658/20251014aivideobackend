@@ -9,7 +9,15 @@ import uuid
 import base64
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Iterable, TYPE_CHECKING
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlencode
+import urllib.parse
+import logging
+import re
+import ipaddress
+
+# 設定日誌
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # JWT 支援
 try:
@@ -196,7 +204,7 @@ def get_user_llm_key(user_id: Optional[str], provider: str = "gemini") -> Option
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse, HTMLResponse, Response
+from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse, HTMLResponse, Response, PlainTextResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -315,6 +323,24 @@ print(f"DEBUG: FRONTEND_BASE_URL: {FRONTEND_BASE_URL}")
 
 # JWT 密鑰（用於生成訪問令牌）
 JWT_SECRET = os.getenv("JWT_SECRET", secrets.token_urlsafe(32))
+
+# ECPay 金流配置
+ECPAY_MERCHANT_ID = os.getenv("ECPAY_MERCHANT_ID")
+ECPAY_HASH_KEY = os.getenv("ECPAY_HASH_KEY")
+ECPAY_HASH_IV = os.getenv("ECPAY_HASH_IV")
+ECPAY_API = os.getenv("ECPAY_API", "https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5")  # 預設測試環境
+ECPAY_RETURN_URL = os.getenv("ECPAY_RETURN_URL", "https://aivideonew.zeabur.app/subscription.html")
+ECPAY_NOTIFY_URL = os.getenv("ECPAY_NOTIFY_URL", "https://aivideobackend.zeabur.app/api/payment/webhook")
+
+# ECPay IP 白名單（從環境變數讀取，支援多個 IP 範圍，用逗號分隔）
+ECPAY_IP_WHITELIST_STR = os.getenv("ECPAY_IP_WHITELIST", "210.200.4.0/24,210.200.5.0/24")
+ECPAY_IP_WHITELIST = [ip.strip() for ip in ECPAY_IP_WHITELIST_STR.split(",") if ip.strip()]
+
+# ECPay 發票設定
+ECPAY_INVOICE_ENABLED = os.getenv("ECPAY_INVOICE_ENABLED", "false").lower() == "true"
+ECPAY_INVOICE_MERCHANT_ID = os.getenv("ECPAY_INVOICE_MERCHANT_ID")  # 發票商店代號（可能與付款不同）
+ECPAY_INVOICE_API = os.getenv("ECPAY_INVOICE_API", "https://einvoice-stage.ecpay.com.tw/Invoice/Issue")  # 測試環境
+# ECPAY_INVOICE_API=https://einvoice.ecpay.com.tw/Invoice/Issue  # 生產環境
 
 # 安全認證
 security = HTTPBearer()
@@ -775,6 +801,472 @@ def generate_dedup_hash(content: str, platform: str = None, topic: str = None) -
 def generate_user_id(email: str) -> str:
     """根據 email 生成用戶 ID"""
     return hashlib.md5(email.encode('utf-8')).hexdigest()[:12]
+
+
+# ===== ECPay 金流功能 =====
+
+def gen_check_mac_value(params: dict) -> str:
+    """生成 ECPay 簽章（CheckMacValue）
+    
+    Args:
+        params: 包含所有參數的字典（不包含 CheckMacValue）
+    
+    Returns:
+        簽章字串（大寫）
+    """
+    if not ECPAY_HASH_KEY or not ECPAY_HASH_IV:
+        raise ValueError("ECPAY_HASH_KEY 或 ECPAY_HASH_IV 未設定")
+    
+    # 移除 CheckMacValue（如果存在）
+    items = [(k, str(v)) for k, v in params.items() if k != "CheckMacValue" and v is not None]
+    # 按照參數名稱排序
+    items.sort(key=lambda x: x[0])
+    # 組合成查詢字串
+    query = "&".join([f"{k}={v}" for k, v in items])
+    # 組合原始字串
+    raw = f"HashKey={ECPAY_HASH_KEY}&{query}&HashIV={ECPAY_HASH_IV}"
+    # URL 編碼並轉小寫，將 %20 替換為 +
+    import urllib.parse
+    urlencoded = urllib.parse.quote(raw, safe="()!*").lower().replace("%20", "+")
+    # SHA256 雜湊並轉大寫
+    return hashlib.sha256(urlencoded.encode("utf-8")).hexdigest().upper()
+
+
+def verify_ecpay_signature(params: dict) -> bool:
+    """驗證 ECPay 簽章
+    
+    Args:
+        params: 包含 CheckMacValue 的參數字典
+    
+    Returns:
+        驗證是否通過
+    """
+    try:
+        received_signature = params.get("CheckMacValue", "")
+        expected_signature = gen_check_mac_value(params)
+        return received_signature == expected_signature
+    except Exception as e:
+        print(f"ERROR: 驗證 ECPay 簽章失敗: {e}")
+        return False
+
+
+def is_ecpay_ip(ip_address: str) -> bool:
+    """檢查 IP 是否在 ECPay 白名單中（完整實作）
+    
+    使用 ipaddress 模組檢查 IP 是否在設定的 IP 範圍內。
+    
+    Args:
+        ip_address: 客戶端 IP 地址
+    
+    Returns:
+        是否在白名單中
+    """
+    if not ip_address:
+        return False
+    
+    # 如果白名單為空，記錄警告但允許通過（測試環境）
+    if not ECPAY_IP_WHITELIST:
+        logger.warning("ECPAY_IP_WHITELIST 未設定，允許所有 IP（僅測試環境）")
+        return True
+    
+    try:
+        # 解析客戶端 IP
+        client_ip = ipaddress.ip_address(ip_address)
+        
+        # 檢查是否在任何一個白名單範圍內
+        for ip_range_str in ECPAY_IP_WHITELIST:
+            try:
+                ip_range = ipaddress.ip_network(ip_range_str, strict=False)
+                if client_ip in ip_range:
+                    logger.info(f"IP {ip_address} 在白名單範圍 {ip_range_str} 內")
+                    return True
+            except ValueError as e:
+                logger.warning(f"無效的 IP 範圍格式: {ip_range_str}, 錯誤: {e}")
+                continue
+        
+        # 如果都不在範圍內，記錄警告
+        logger.warning(f"IP {ip_address} 不在 ECPay 白名單內，白名單: {ECPAY_IP_WHITELIST}")
+        return False
+    
+    except ValueError as e:
+        logger.error(f"無效的 IP 地址格式: {ip_address}, 錯誤: {e}")
+        return False
+
+
+# ===== 輸入驗證函數 =====
+
+def validate_api_key(api_key: str, provider: str) -> bool:
+    """驗證 API Key 格式
+    
+    Args:
+        api_key: API Key 字串
+        provider: 提供商（'gemini' 或 'openai'）
+    
+    Returns:
+        是否有效
+    """
+    if not api_key or not isinstance(api_key, str):
+        return False
+    
+    # 長度限制
+    if len(api_key) > 500:
+        return False
+    
+    # 根據提供商驗證格式
+    if provider == "gemini":
+        # Gemini API Key 通常是 "AIzaSy..." 開頭，32-39 字符
+        if not api_key.startswith("AIzaSy") or len(api_key) < 32 or len(api_key) > 39:
+            return False
+    elif provider == "openai":
+        # OpenAI API Key 通常是 "sk-" 開頭
+        if not api_key.startswith("sk-") or len(api_key) < 20:
+            return False
+    
+    # 只允許字母、數字、連字號、底線
+    if not re.match(r'^[A-Za-z0-9_-]+$', api_key):
+        return False
+    
+    return True
+
+
+def validate_user_id(user_id: str) -> bool:
+    """驗證用戶 ID 格式
+    
+    Args:
+        user_id: 用戶 ID 字串
+    
+    Returns:
+        是否有效
+    """
+    if not user_id or not isinstance(user_id, str):
+        return False
+    
+    # 長度限制
+    if len(user_id) > 50:
+        return False
+    
+    # 只允許字母、數字、連字號、底線
+    if not re.match(r'^[a-zA-Z0-9_-]+$', user_id):
+        return False
+    
+    return True
+
+
+def validate_email(email: str) -> bool:
+    """驗證 Email 格式
+    
+    Args:
+        email: Email 字串
+    
+    Returns:
+        是否有效
+    """
+    if not email or not isinstance(email, str):
+        return False
+    
+    # 長度限制
+    if len(email) > 255:
+        return False
+    
+    # 基本 Email 格式驗證
+    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(email_pattern, email))
+
+
+# ===== ECPay 發票開立功能 =====
+
+async def issue_ecpay_invoice(
+    trade_no: str,
+    amount: int,
+    invoice_type: str,
+    vat_number: Optional[str] = None,
+    user_id: Optional[str] = None
+) -> Optional[str]:
+    """開立 ECPay 電子發票
+    
+    Args:
+        trade_no: 訂單號
+        amount: 金額
+        invoice_type: 發票類型（'personal' 或 'company'）
+        vat_number: 統編（公司發票必填）
+        user_id: 用戶 ID（用於查詢用戶資訊）
+    
+    Returns:
+        發票號碼，失敗返回 None
+    """
+    if not ECPAY_INVOICE_ENABLED:
+        logger.info("發票功能未啟用")
+        return None
+    
+    if not ECPAY_INVOICE_MERCHANT_ID:
+        logger.warning("ECPAY_INVOICE_MERCHANT_ID 未設定，無法開立發票")
+        return None
+    
+    try:
+        # 查詢用戶資訊（Email、姓名）
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        database_url = os.getenv("DATABASE_URL")
+        use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+        
+        email = ""
+        name = ""
+        if user_id:
+            if use_postgresql:
+                cursor.execute(
+                    "SELECT email, name FROM user_auth WHERE user_id = %s",
+                    (user_id,)
+                )
+            else:
+                cursor.execute(
+                    "SELECT email, name FROM user_auth WHERE user_id = ?",
+                    (user_id,)
+                )
+            
+            user_info = cursor.fetchone()
+            if user_info:
+                email = user_info[0] or ""
+                name = user_info[1] or ""
+        
+        cursor.close()
+        conn.close()
+        
+        # 準備發票參數
+        invoice_data = {
+            "MerchantID": ECPAY_INVOICE_MERCHANT_ID,
+            "RelateNumber": trade_no,  # 關聯訂單號
+            "InvoiceDate": get_taiwan_time().strftime("%Y/%m/%d %H:%M:%S"),
+            "InvoiceType": "07",  # 一般稅額
+            "TaxType": "1",  # 應稅
+            "SalesAmount": amount,
+            "Items": json.dumps([{
+                "ItemName": f"ReelMind 訂閱方案",
+                "ItemCount": 1,
+                "ItemWord": "次",
+                "ItemPrice": amount,
+                "ItemTaxType": "1",
+                "ItemAmount": amount
+            }]),
+        }
+        
+        # 根據發票類型設定
+        if invoice_type == "company" and vat_number:
+            # 公司發票（三聯式）
+            invoice_data["CustomerIdentifier"] = vat_number
+            invoice_data["Print"] = "0"  # 不列印
+        else:
+            # 個人發票（二聯式）
+            invoice_data["CustomerEmail"] = email
+            invoice_data["Print"] = "0"
+        
+        # 生成簽章
+        invoice_data["CheckMacValue"] = gen_check_mac_value(invoice_data)
+        
+        # 呼叫 ECPay 發票 API
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                ECPAY_INVOICE_API,
+                data=invoice_data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"}
+            )
+            
+            if response.status_code == 200:
+                # 解析回應（ECPay 返回格式：RtnCode|RtnMsg|InvoiceNo|...）
+                response_text = response.text
+                parts = response_text.split("|")
+                
+                if len(parts) >= 3 and parts[0] == "1":
+                    invoice_number = parts[2]  # 發票號碼
+                    logger.info(f"發票開立成功: {invoice_number}")
+                    return invoice_number
+                else:
+                    error_msg = parts[1] if len(parts) > 1 else "未知錯誤"
+                    logger.error(f"發票開立失敗: {error_msg}, 回應: {response_text}")
+                    return None
+            else:
+                logger.error(f"發票 API 請求失敗: HTTP {response.status_code}")
+                return None
+    
+    except Exception as e:
+        logger.error(f"開立發票異常: {e}", exc_info=True)
+        return None
+
+
+# ===== ECPay 退款處理功能 =====
+
+async def process_ecpay_refund(
+    trade_no: str,
+    refund_amount: Optional[int] = None,
+    refund_reason: Optional[str] = None
+) -> Dict[str, Any]:
+    """處理 ECPay 退款
+    
+    Args:
+        trade_no: 訂單號
+        refund_amount: 退款金額（None 表示全額退款）
+        refund_reason: 退款原因
+    
+    Returns:
+        退款結果字典
+    """
+    try:
+        # 查詢訂單資訊
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        database_url = os.getenv("DATABASE_URL")
+        use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+        
+        if use_postgresql:
+            cursor.execute(
+                "SELECT amount, payment_status, invoice_number FROM orders WHERE order_id = %s",
+                (trade_no,)
+            )
+        else:
+            cursor.execute(
+                "SELECT amount, payment_status, invoice_number FROM orders WHERE order_id = ?",
+                (trade_no,)
+            )
+        
+        order = cursor.fetchone()
+        
+        if not order:
+            cursor.close()
+            conn.close()
+            return {"success": False, "error": "訂單不存在"}
+        
+        amount, payment_status, invoice_number = order
+        
+        # 檢查訂單狀態
+        if payment_status != "paid":
+            cursor.close()
+            conn.close()
+            return {"success": False, "error": f"訂單狀態不允許退款: {payment_status}"}
+        
+        # 確定退款金額
+        if refund_amount is None:
+            refund_amount = amount
+        elif refund_amount > amount:
+            cursor.close()
+            conn.close()
+            return {"success": False, "error": "退款金額不能超過訂單金額"}
+        
+        # 如果有發票，需要作廢發票
+        if invoice_number and ECPAY_INVOICE_ENABLED:
+            # 先作廢發票
+            invoice_void_result = await void_ecpay_invoice(invoice_number, trade_no)
+            if not invoice_void_result.get("success"):
+                logger.warning(f"發票作廢失敗: {invoice_void_result.get('error')}")
+        
+        # 準備退款參數
+        refund_data = {
+            "MerchantID": ECPAY_MERCHANT_ID,
+            "MerchantTradeNo": trade_no,
+            "TradeNo": "",  # ECPay 交易序號（需要從訂單記錄中取得）
+            "Action": "R",  # Refund
+            "TotalAmount": refund_amount,
+        }
+        
+        # 生成簽章
+        refund_data["CheckMacValue"] = gen_check_mac_value(refund_data)
+        
+        # 呼叫 ECPay 退款 API
+        refund_api = ECPAY_API.replace("/Cashier/AioCheckOut/V5", "/Cashier/QueryTradeInfo/V5")
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                refund_api,
+                data=refund_data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"}
+            )
+            
+            if response.status_code == 200:
+                response_text = response.text
+                # 解析回應
+                if "RtnCode=1" in response_text:
+                    # 更新訂單狀態
+                    if use_postgresql:
+                        cursor.execute("""
+                            UPDATE orders 
+                            SET payment_status = %s,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE order_id = %s
+                        """, ("refunded", trade_no))
+                    else:
+                        cursor.execute("""
+                            UPDATE orders 
+                            SET payment_status = ?,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE order_id = ?
+                        """, ("refunded", trade_no))
+                    
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+                    
+                    logger.info(f"退款成功，訂單號: {trade_no}, 金額: {refund_amount}")
+                    return {"success": True, "refund_amount": refund_amount}
+                else:
+                    cursor.close()
+                    conn.close()
+                    error_msg = response_text
+                    logger.error(f"退款失敗: {error_msg}")
+                    return {"success": False, "error": error_msg}
+            else:
+                cursor.close()
+                conn.close()
+                logger.error(f"退款 API 請求失敗: HTTP {response.status_code}")
+                return {"success": False, "error": f"HTTP {response.status_code}"}
+    
+    except Exception as e:
+        logger.error(f"退款處理異常: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+async def void_ecpay_invoice(invoice_number: str, trade_no: str) -> Dict[str, Any]:
+    """作廢 ECPay 電子發票
+    
+    Args:
+        invoice_number: 發票號碼
+        trade_no: 訂單號
+    
+    Returns:
+        作廢結果字典
+    """
+    try:
+        void_data = {
+            "MerchantID": ECPAY_INVOICE_MERCHANT_ID,
+            "InvoiceNumber": invoice_number,
+            "VoidReason": "訂單退款",
+        }
+        
+        void_data["CheckMacValue"] = gen_check_mac_value(void_data)
+        
+        void_api = ECPAY_INVOICE_API.replace("/Invoice/Issue", "/Invoice/Invalid")
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                void_api,
+                data=void_data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"}
+            )
+            
+            if response.status_code == 200:
+                response_text = response.text
+                parts = response_text.split("|")
+                
+                if len(parts) >= 2 and parts[0] == "1":
+                    return {"success": True}
+                else:
+                    error_msg = parts[1] if len(parts) > 1 else "未知錯誤"
+                    return {"success": False, "error": error_msg}
+            else:
+                return {"success": False, "error": f"HTTP {response.status_code}"}
+    
+    except Exception as e:
+        logger.error(f"作廢發票異常: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
 
 
 def generate_access_token(user_id: str) -> str:
@@ -1497,21 +1989,31 @@ def create_app() -> FastAPI:
     # CORS for local file or dev servers
     frontend_url = os.getenv("FRONTEND_URL")
     cors_origins = [
-        "http://localhost:5173",   # 本地前端
+        "http://localhost:5173",   # 本地前端（開發環境）
         "http://127.0.0.1:5173",  # 本地前端（備用）
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-        "https://aivideonew.zeabur.app",
-        "http://aivideonew.zeabur.app",
-        "https://reelmind.aijob.com.tw",
-        "http://reelmind.aijob.com.tw",
-        "https://backmanage.zeabur.app",
-        "http://backmanage.zeabur.app"
+        "http://localhost:8080",  # 本地測試
+        "http://127.0.0.1:8080",  # 本地測試
+        "https://aivideonew.zeabur.app",  # 生產環境前端
+        "https://reelmind.aijob.com.tw",  # 生產環境前端
+        "https://backmanage.zeabur.app",  # 後台管理系統
     ]
     
-    # 如果有設定前端 URL，加入 CORS 來源
+    # 如果有設定前端 URL，嚴格驗證後加入 CORS 來源
     if frontend_url:
-        cors_origins.append(frontend_url)
+        # 只允許 HTTPS（生產環境必須使用 HTTPS）
+        if not frontend_url.startswith("https://"):
+            # 開發環境允許 HTTP（localhost）
+            if not frontend_url.startswith("http://localhost") and not frontend_url.startswith("http://127.0.0.1"):
+                print(f"WARNING: FRONTEND_URL 必須使用 HTTPS: {frontend_url}")
+            else:
+                cors_origins.append(frontend_url)
+        else:
+            # 驗證域名格式
+            parsed = urlparse(frontend_url)
+            if not parsed.netloc or parsed.netloc.count('.') < 1:
+                print(f"WARNING: FRONTEND_URL 格式錯誤: {frontend_url}")
+            else:
+                cors_origins.append(frontend_url)
     
     app.add_middleware(
         CORSMiddleware,
@@ -1520,6 +2022,20 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    
+    # 安全標頭中間件
+    @app.middleware("http")
+    async def add_security_headers(request: Request, call_next):
+        """添加安全標頭"""
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        # HSTS（只對 HTTPS 請求添加）
+        if request.url.scheme == "https":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        return response
 
     kb_text_cache = load_kb_text()
 
@@ -1640,6 +2156,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
 
     @app.post("/api/generate/topics")
+    @rate_limit("10/minute")
     async def generate_topics(body: ChatBody, request: Request):
         """一鍵生成選題推薦"""
         # 檢查是否有用戶自定義的 API Key
@@ -1707,6 +2224,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
 
     @app.post("/api/generate/script")
+    @rate_limit("10/minute")
     async def generate_script(body: ChatBody, request: Request):
         """一鍵生成腳本"""
         # 檢查是否有用戶自定義的 API Key
@@ -1776,6 +2294,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
 
     @app.post("/api/chat/stream")
+    @rate_limit("30/minute")
     async def stream_chat(body: ChatBody, request: Request):
         user_id = getattr(body, 'user_id', None)
         
@@ -4654,6 +5173,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
     
     @app.get("/api/admin/export/{export_type}")
+    @rate_limit("10/minute")
     async def export_csv(export_type: str, admin_user: str = Depends(get_admin_user)):
         """匯出 CSV 檔案"""
         import csv
@@ -5842,7 +6362,442 @@ def create_app() -> FastAPI:
             error_response.headers["Access-Control-Allow-Origin"] = "https://aivideonew.zeabur.app"
             return error_response
 
-    # ===== 金流回調（準備用，未啟用驗簽） =====
+    # ===== ECPay 金流串接 =====
+    
+    @app.post("/api/payment/checkout", response_class=HTMLResponse)
+    async def create_payment_order(request: Request, current_user_id: Optional[str] = Depends(get_current_user)):
+        """建立 ECPay 付款訂單並返回付款表單
+        
+        請求參數：
+        - plan: 'monthly' | 'yearly'
+        - amount: 金額（可選，會根據 plan 自動計算）
+        - name: 姓名
+        - email: 電子信箱
+        - phone: 電話（可選）
+        - invoiceType: 發票類型（可選）
+        - vat: 統編（可選）
+        - note: 備註（可選）
+        """
+        if not current_user_id:
+            return HTMLResponse("<html><body><h1>請先登入</h1></body></html>", status_code=401)
+        
+        if not ECPAY_MERCHANT_ID or not ECPAY_HASH_KEY or not ECPAY_HASH_IV:
+            return HTMLResponse("<html><body><h1>ECPay 設定未完成，請聯繫管理員</h1></body></html>", status_code=500)
+        
+        try:
+            body = await request.json()
+            plan = body.get("plan")
+            amount = body.get("amount")
+            name = body.get("name", "")
+            email = body.get("email", "")
+            phone = body.get("phone", "")
+            invoice_type = body.get("invoiceType", "")
+            vat = body.get("vat", "")
+            note = body.get("note", "")
+            
+            # 驗證必填欄位
+            if not plan or plan not in ("monthly", "yearly"):
+                return HTMLResponse("<html><body><h1>無效的方案類型</h1></body></html>", status_code=400)
+            
+            if not name or not email:
+                return HTMLResponse("<html><body><h1>請填寫姓名和電子信箱</h1></body></html>", status_code=400)
+            
+            # 計算金額（如果未提供）
+            if not amount:
+                amount = 1990 if plan == "monthly" else 19900  # 預設價格
+            
+            # 生成訂單號
+            trade_no = f"RM{current_user_id[:8]}{int(time.time())}{uuid.uuid4().hex[:6].upper()}"
+            
+            # 建立訂單記錄（pending 狀態）
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            try:
+                if use_postgresql:
+                    cursor.execute("""
+                        INSERT INTO orders (user_id, order_id, plan_type, amount, payment_status, payment_method, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    """, (current_user_id, trade_no, plan, amount, "pending", "ecpay"))
+                else:
+                    cursor.execute("""
+                        INSERT INTO orders (user_id, order_id, plan_type, amount, payment_status, payment_method, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """, (current_user_id, trade_no, plan, amount, "pending", "ecpay"))
+                
+                conn.commit()
+            except Exception as e:
+                print(f"WARN: 建立訂單記錄失敗: {e}")
+                conn.rollback()
+            finally:
+                cursor.close()
+                conn.close()
+            
+            # 準備 ECPay 參數
+            trade_date = get_taiwan_time().strftime("%Y/%m/%d %H:%M:%S")
+            item_name = f"ReelMind {'月費' if plan == 'monthly' else '年費'}方案"
+            
+            ecpay_data = {
+                "MerchantID": ECPAY_MERCHANT_ID,
+                "MerchantTradeNo": trade_no,
+                "MerchantTradeDate": trade_date,
+                "PaymentType": "aio",
+                "TotalAmount": int(amount),
+                "TradeDesc": item_name,
+                "ItemName": item_name,
+                "ReturnURL": ECPAY_NOTIFY_URL,  # 伺服器端通知
+                "OrderResultURL": f"{ECPAY_RETURN_URL}?order_id={trade_no}",  # 用戶返回頁
+                "ChoosePayment": "Credit",
+                "EncryptType": 1,
+                "ClientBackURL": ECPAY_RETURN_URL,  # 取消付款返回頁
+            }
+            
+            # 生成簽章
+            ecpay_data["CheckMacValue"] = gen_check_mac_value(ecpay_data)
+            
+            # 生成 HTML 表單（自動提交到 ECPay）
+            inputs = "\n".join([f'<input type="hidden" name="{k}" value="{v}"/>' for k, v in ecpay_data.items()])
+            html = f'''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>正在導向至付款頁面...</title>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }}
+        .container {{
+            text-align: center;
+            background: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+        }}
+        .spinner {{
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }}
+        @keyframes spin {{
+            0% {{ transform: rotate(0deg); }}
+            100% {{ transform: rotate(360deg); }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>正在導向至付款頁面...</h2>
+        <div class="spinner"></div>
+        <p>請稍候，即將為您跳轉</p>
+    </div>
+    <form id="ecpayForm" method="post" action="{ECPAY_API}">
+        {inputs}
+    </form>
+    <script>
+        document.getElementById("ecpayForm").submit();
+    </script>
+</body>
+</html>'''
+            
+            return HTMLResponse(html)
+        
+        except Exception as e:
+            print(f"ERROR: 建立付款訂單失敗: {e}")
+            return HTMLResponse(f"<html><body><h1>建立訂單失敗: {str(e)}</h1></body></html>", status_code=500)
+    
+    @app.post("/api/payment/webhook", response_class=PlainTextResponse)
+    async def ecpay_webhook(request: Request):
+        """ECPay 伺服器端通知（Webhook）
+        
+        這是 ECPay 主動通知的端點，用於更新訂單狀態。
+        必須驗證簽章和 IP 白名單。
+        """
+        try:
+            # 獲取表單數據
+            form = await request.form()
+            params = dict(form.items())
+            
+            # 驗證 IP 白名單（完整實作）
+            client_ip = request.client.host if request.client else None
+            # 獲取真實 IP（考慮反向代理）
+            if "x-forwarded-for" in request.headers:
+                client_ip = request.headers["x-forwarded-for"].split(",")[0].strip()
+            
+            if not is_ecpay_ip(client_ip):
+                logger.warning(f"非 ECPay IP 嘗試訪問 webhook: {client_ip}")
+                # 生產環境應該返回錯誤
+                if os.getenv("ENVIRONMENT", "production") == "production":
+                    return PlainTextResponse("0|FAIL")
+            
+            # 驗證簽章
+            if not verify_ecpay_signature(params):
+                print("ERROR: ECPay Webhook 簽章驗證失敗")
+                return PlainTextResponse("0|FAIL")
+            
+            # 獲取訂單資訊
+            trade_no = params.get("MerchantTradeNo", "")
+            rtn_code = params.get("RtnCode", "")
+            payment_date = params.get("PaymentDate", "")
+            trade_amt = params.get("TradeAmt", "")
+            
+            # 檢查付款狀態
+            if str(rtn_code) != "1":
+                print(f"WARNING: ECPay 付款失敗，訂單號: {trade_no}, RtnCode: {rtn_code}")
+                return PlainTextResponse("1|OK")  # 仍然返回 OK，避免 ECPay 重複通知
+            
+            # 更新訂單狀態
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            try:
+                # 查詢訂單
+                if use_postgresql:
+                    cursor.execute(
+                        "SELECT user_id, plan_type, amount FROM orders WHERE order_id = %s",
+                        (trade_no,)
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT user_id, plan_type, amount FROM orders WHERE order_id = ?",
+                        (trade_no,)
+                    )
+                
+                order = cursor.fetchone()
+                
+                if not order:
+                    print(f"WARNING: 找不到訂單: {trade_no}")
+                    return PlainTextResponse("1|OK")
+                
+                user_id, plan_type, amount = order
+                
+                # 檢查訂單是否已經處理過（防止重複處理）
+                if use_postgresql:
+                    cursor.execute(
+                        "SELECT payment_status FROM orders WHERE order_id = %s",
+                        (trade_no,)
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT payment_status FROM orders WHERE order_id = ?",
+                        (trade_no,)
+                    )
+                
+                existing_order = cursor.fetchone()
+                if existing_order and existing_order[0] == "paid":
+                    print(f"INFO: 訂單已處理過: {trade_no}")
+                    return PlainTextResponse("1|OK")
+                
+                # 計算到期日
+                days = 30 if plan_type == "monthly" else 365
+                expires_dt = get_taiwan_time() + timedelta(days=days)
+                
+                # 查詢訂單發票資訊
+                if use_postgresql:
+                    cursor.execute(
+                        "SELECT invoice_type, vat_number FROM orders WHERE order_id = %s",
+                        (trade_no,)
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT invoice_type, vat_number FROM orders WHERE order_id = ?",
+                        (trade_no,)
+                    )
+                
+                invoice_info = cursor.fetchone()
+                invoice_type = invoice_info[0] if invoice_info and invoice_info[0] else None
+                vat_number = invoice_info[1] if invoice_info and invoice_info[1] else None
+                
+                # 開立發票（如果啟用）
+                invoice_number = None
+                if ECPAY_INVOICE_ENABLED and invoice_type:
+                    try:
+                        invoice_number = await issue_ecpay_invoice(
+                            trade_no=trade_no,
+                            amount=int(trade_amt),
+                            invoice_type=invoice_type,
+                            vat_number=vat_number,
+                            user_id=user_id
+                        )
+                        if invoice_number:
+                            logger.info(f"發票開立成功，訂單號: {trade_no}, 發票號: {invoice_number}")
+                        else:
+                            logger.warning(f"發票開立失敗，訂單號: {trade_no}")
+                    except Exception as e:
+                        logger.error(f"發票開立異常，訂單號: {trade_no}, 錯誤: {e}")
+                
+                # 更新訂單狀態
+                if use_postgresql:
+                    cursor.execute("""
+                        UPDATE orders 
+                        SET payment_status = %s, 
+                            paid_at = %s, 
+                            invoice_number = %s,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE order_id = %s
+                    """, ("paid", payment_date, invoice_number or trade_no, trade_no))
+                else:
+                    cursor.execute("""
+                        UPDATE orders 
+                        SET payment_status = ?, 
+                            paid_at = ?, 
+                            invoice_number = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE order_id = ?
+                    """, ("paid", payment_date, invoice_number or trade_no, trade_no))
+                
+                # 更新/建立 licenses 記錄
+                if use_postgresql:
+                    cursor.execute("""
+                        INSERT INTO licenses (user_id, tier, seats, expires_at, status, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        ON CONFLICT (user_id)
+                        DO UPDATE SET
+                            tier = EXCLUDED.tier,
+                            expires_at = EXCLUDED.expires_at,
+                            status = EXCLUDED.status,
+                            updated_at = CURRENT_TIMESTAMP
+                    """, (user_id, plan_type, 1, expires_dt, "active"))
+                else:
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO licenses
+                        (user_id, tier, seats, expires_at, status, updated_at)
+                        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """, (user_id, plan_type, 1, expires_dt.timestamp(), "active"))
+                
+                # 更新用戶訂閱狀態
+                if use_postgresql:
+                    cursor.execute(
+                        "UPDATE user_auth SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s",
+                        (user_id,)
+                    )
+                else:
+                    cursor.execute(
+                        "UPDATE user_auth SET is_subscribed = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                        (user_id,)
+                    )
+                
+                conn.commit()
+                print(f"SUCCESS: 訂單付款成功，訂單號: {trade_no}, 用戶: {user_id}")
+                
+            except Exception as e:
+                print(f"ERROR: 更新訂單狀態失敗: {e}")
+                conn.rollback()
+                return PlainTextResponse("0|FAIL")
+            finally:
+                cursor.close()
+                conn.close()
+            
+            return PlainTextResponse("1|OK")
+        
+        except Exception as e:
+            print(f"ERROR: ECPay Webhook 處理失敗: {e}")
+            return PlainTextResponse("0|FAIL")
+    
+    @app.get("/api/payment/return")
+    async def ecpay_return(request: Request):
+        """ECPay 用戶返回頁（用戶瀏覽器返回）
+        
+        用戶完成付款後，ECPay 會 redirect 到這個頁面。
+        驗證簽章後，redirect 到前端結果頁。
+        """
+        try:
+            # 獲取 URL 參數
+            params = dict(request.query_params.items())
+            
+            # 驗證簽章
+            if not verify_ecpay_signature(params):
+                print("ERROR: ECPay Return 簽章驗證失敗")
+                return RedirectResponse(
+                    url=f"{ECPAY_RETURN_URL}?status=error&message=簽章驗證失敗",
+                    status_code=302
+                )
+            
+            # 獲取訂單資訊
+            trade_no = params.get("MerchantTradeNo", "")
+            rtn_code = params.get("RtnCode", "")
+            
+            # 檢查付款狀態
+            if str(rtn_code) == "1":
+                # 付款成功，redirect 到前端成功頁
+                return RedirectResponse(
+                    url=f"{ECPAY_RETURN_URL}?status=success&order_id={trade_no}",
+                    status_code=302
+                )
+            else:
+                # 付款失敗，redirect 到前端失敗頁
+                rtn_msg = params.get("RtnMsg", "付款失敗")
+                return RedirectResponse(
+                    url=f"{ECPAY_RETURN_URL}?status=failed&order_id={trade_no}&message={urllib.parse.quote(rtn_msg)}",
+                    status_code=302
+                )
+        
+        except Exception as e:
+            print(f"ERROR: ECPay Return 處理失敗: {e}")
+            return RedirectResponse(
+                url=f"{ECPAY_RETURN_URL}?status=error&message=處理失敗",
+                status_code=302
+            )
+    
+    @app.post("/api/payment/refund")
+    async def refund_order(
+        request: Request,
+        admin_user: str = Depends(get_admin_user)
+    ):
+        """退款處理（管理員專用）
+        
+        請求參數：
+        - order_id: 訂單號
+        - refund_amount: 退款金額（可選，不填則全額退款）
+        - refund_reason: 退款原因（可選）
+        """
+        try:
+            body = await request.json()
+            order_id = body.get("order_id")
+            refund_amount = body.get("refund_amount")
+            refund_reason = body.get("refund_reason", "管理員退款")
+            
+            if not order_id:
+                return JSONResponse({"error": "缺少訂單號"}, status_code=400)
+            
+            # 處理退款
+            result = await process_ecpay_refund(
+                trade_no=order_id,
+                refund_amount=refund_amount,
+                refund_reason=refund_reason
+            )
+            
+            if result.get("success"):
+                return JSONResponse({
+                    "message": "退款成功",
+                    "order_id": order_id,
+                    "refund_amount": result.get("refund_amount")
+                })
+            else:
+                return JSONResponse({
+                    "error": result.get("error", "退款失敗")
+                }, status_code=400)
+        
+        except Exception as e:
+            logger.error(f"退款處理失敗: {e}", exc_info=True)
+            return JSONResponse({"error": "服務器錯誤，請稍後再試"}, status_code=500)
+    
+    # ===== 舊的金流回調（保留向後兼容，建議移除） =====
     @app.post("/api/payment/callback")
     async def payment_callback(payload: dict):
         """金流回調（測試/準備用）：更新用戶訂閱狀態與到期日。
@@ -6636,6 +7591,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=500)
 
     @app.post("/api/admin/auth/login")
+    @rate_limit("5/minute")
     async def admin_login(request: Request):
         """管理員帳號密碼登入"""
         try:
@@ -6816,6 +7772,14 @@ def create_app() -> FastAPI:
             if provider not in ["gemini", "openai"]:
                 return JSONResponse({"error": "不支援的 provider，只支援 'gemini' 或 'openai'"}, status_code=400)
             
+            # 驗證用戶 ID 格式
+            if not validate_user_id(user_id):
+                return JSONResponse({"error": "用戶 ID 格式無效"}, status_code=400)
+            
+            # 驗證 API Key 格式
+            if not validate_api_key(api_key, provider):
+                return JSONResponse({"error": "API Key 格式無效"}, status_code=400)
+            
             # 加密 API Key
             encrypted_key = encrypt_api_key(api_key)
             
@@ -6852,10 +7816,14 @@ def create_app() -> FastAPI:
             return {"message": "API Key 已安全保存", "provider": provider, "last4": last4}
         
         except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=400)
+            # 用戶輸入錯誤，返回友好提示
+            logger.warning(f"保存 LLM Key 輸入錯誤: {e}, user_id: {current_user_id}")
+            return JSONResponse({"error": "輸入格式錯誤，請檢查後重試"}, status_code=400)
         except Exception as e:
-            print(f"ERROR: 保存 LLM Key 失敗: {e}")
-            return JSONResponse({"error": f"保存失敗: {str(e)}"}, status_code=500)
+            # 記錄詳細錯誤到日誌（不返回給用戶）
+            logger.error(f"保存 LLM Key 失敗: {e}", exc_info=True)
+            # 返回通用錯誤信息
+            return JSONResponse({"error": "服務器錯誤，請稍後再試"}, status_code=500)
     
     @app.get("/api/user/llm-keys/{user_id}")
     async def get_llm_keys(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
@@ -6899,8 +7867,8 @@ def create_app() -> FastAPI:
             return {"keys": keys}
         
         except Exception as e:
-            print(f"ERROR: 獲取 LLM Keys 失敗: {e}")
-            return JSONResponse({"error": f"獲取失敗: {str(e)}"}, status_code=500)
+            logger.error(f"獲取 LLM Keys 失敗: {e}", exc_info=True)
+            return JSONResponse({"error": "服務器錯誤，請稍後再試"}, status_code=500)
     
     @app.post("/api/user/llm-keys/test")
     @rate_limit("3/minute")
@@ -6942,8 +7910,8 @@ def create_app() -> FastAPI:
                 return JSONResponse({"error": "不支援的 provider"}, status_code=400)
         
         except Exception as e:
-            print(f"ERROR: 測試 LLM Key 失敗: {e}")
-            return JSONResponse({"error": f"測試失敗: {str(e)}"}, status_code=500)
+            logger.error(f"測試 LLM Key 失敗: {e}", exc_info=True)
+            return JSONResponse({"error": "服務器錯誤，請稍後再試"}, status_code=500)
     
     @app.delete("/api/user/llm-keys/{user_id}")
     async def delete_llm_key(user_id: str, request: Request, current_user_id: Optional[str] = Depends(get_current_user)):
@@ -6986,8 +7954,8 @@ def create_app() -> FastAPI:
                 return JSONResponse({"error": "找不到指定的 API Key"}, status_code=404)
         
         except Exception as e:
-            print(f"ERROR: 刪除 LLM Key 失敗: {e}")
-            return JSONResponse({"error": f"刪除失敗: {str(e)}"}, status_code=500)
+            logger.error(f"刪除 LLM Key 失敗: {e}", exc_info=True)
+            return JSONResponse({"error": "服務器錯誤，請稍後再試"}, status_code=500)
 
     return app
 
