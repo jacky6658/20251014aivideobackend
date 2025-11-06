@@ -7107,8 +7107,7 @@ def create_app() -> FastAPI:
                 "activation_link": activation_link,
                 "plan_type": plan_type,
                 "license_expires_at": license_expires_at.isoformat(),
-                "link_expires_at": link_expires_at.isoformat(),
-                "message": "授權連結已生成，請將 activation_link 寄送給用戶"
+                "link_expires_at": link_expires_at.isoformat()
             }
             
         except Exception as e:
