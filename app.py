@@ -17,6 +17,7 @@ import ipaddress
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from html import escape as html_escape
 
 # 設定日誌
 logging.basicConfig(level=logging.INFO)
@@ -8763,26 +8764,26 @@ def create_app() -> FastAPI:
 發送時間：{get_taiwan_time().strftime('%Y-%m-%d %H:%M:%S')}
 """
             
-            # HTML 格式的郵件內容
+            # HTML 格式的郵件內容（轉義用戶輸入以防止 XSS 和格式問題）
             html_body = f"""
             <html>
             <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
                 <h2 style="color: #2563EB;">ReelMind 聯繫表單</h2>
                 
                 <h3 style="color: #1E293B; border-bottom: 2px solid #E2E8F0; padding-bottom: 8px;">基本資訊</h3>
-                <p><strong>姓名：</strong>{name}</p>
-                <p><strong>電子信箱：</strong><a href="mailto:{email}">{email}</a></p>
-                <p><strong>電話：</strong>{phone or '未填寫'}</p>
-                <p><strong>公司名稱：</strong>{company or '未填寫'}</p>
+                <p><strong>姓名：</strong>{html_escape(name)}</p>
+                <p><strong>電子信箱：</strong><a href="mailto:{html_escape(email)}">{html_escape(email)}</a></p>
+                <p><strong>電話：</strong>{html_escape(phone) if phone else '未填寫'}</p>
+                <p><strong>公司名稱：</strong>{html_escape(company) if company else '未填寫'}</p>
                 
                 <h3 style="color: #1E293B; border-bottom: 2px solid #E2E8F0; padding-bottom: 8px; margin-top: 24px;">需求資訊</h3>
-                <p><strong>需求類型：</strong>{inquiry_type_map.get(inquiry_type, '未填寫')}</p>
-                <p><strong>預算範圍：</strong>{budget_map.get(budget, '未填寫') if budget else '未填寫'}</p>
-                <p><strong>團隊規模：</strong>{team_size_map.get(team_size, '未填寫') if team_size else '未填寫'}</p>
-                <p><strong>預計使用時間：</strong>{timeline_map.get(timeline, '未填寫') if timeline else '未填寫'}</p>
+                <p><strong>需求類型：</strong>{html_escape(inquiry_type_map.get(inquiry_type, '未填寫'))}</p>
+                <p><strong>預算範圍：</strong>{html_escape(budget_map.get(budget, '未填寫') if budget else '未填寫')}</p>
+                <p><strong>團隊規模：</strong>{html_escape(team_size_map.get(team_size, '未填寫') if team_size else '未填寫')}</p>
+                <p><strong>預計使用時間：</strong>{html_escape(timeline_map.get(timeline, '未填寫') if timeline else '未填寫')}</p>
                 
                 <h3 style="color: #1E293B; border-bottom: 2px solid #E2E8F0; padding-bottom: 8px; margin-top: 24px;">詳細需求</h3>
-                <p style="white-space: pre-wrap; background: #F8FAFC; padding: 16px; border-radius: 8px; border-left: 4px solid #2563EB;">{message or '未填寫'}</p>
+                <p style="white-space: pre-wrap; background: #F8FAFC; padding: 16px; border-radius: 8px; border-left: 4px solid #2563EB;">{html_escape(message) if message else '未填寫'}</p>
                 
                 <hr style="border: none; border-top: 1px solid #E2E8F0; margin: 24px 0;">
                 <p style="color: #64748B; font-size: 12px;">
@@ -8793,29 +8794,57 @@ def create_app() -> FastAPI:
             </html>
             """
             
-            # 發送郵件
-            success = send_email(
-                to_email=CONTACT_EMAIL,
-                subject=subject,
-                body=email_body,
-                html_body=html_body
-            )
+            # 檢查 SMTP 配置
+            if not SMTP_ENABLED:
+                logger.warning("SMTP 功能未啟用，聯繫表單提交失敗")
+                return JSONResponse(
+                    {"error": "郵件功能未啟用，請直接來信至 aiagent168168@gmail.com"},
+                    status_code=503
+                )
             
-            if success:
-                return JSONResponse({
-                    "success": True,
-                    "message": "您的訊息已成功發送，我們會在 24 小時內回覆您"
-                })
-            else:
+            if not SMTP_USER or not SMTP_PASSWORD:
+                logger.error("SMTP 帳號或密碼未設定，聯繫表單提交失敗")
+                return JSONResponse(
+                    {"error": "郵件服務未配置，請直接來信至 aiagent168168@gmail.com"},
+                    status_code=503
+                )
+            
+            # 發送郵件
+            try:
+                success = send_email(
+                    to_email=CONTACT_EMAIL,
+                    subject=subject,
+                    body=email_body,
+                    html_body=html_body
+                )
+                
+                if success:
+                    return JSONResponse({
+                        "success": True,
+                        "message": "您的訊息已成功發送，我們會在 24 小時內回覆您"
+                    })
+                else:
+                    # 郵件發送失敗，但不返回 500，而是返回友好的錯誤訊息
+                    logger.error(f"郵件發送失敗，但表單資料已記錄。Email: {email}, Name: {name}")
+                    return JSONResponse(
+                        {"error": "郵件發送失敗，請稍後再試或直接來信至 aiagent168168@gmail.com"},
+                        status_code=503
+                    )
+            except Exception as email_error:
+                logger.error(f"發送郵件時發生異常: {email_error}", exc_info=True)
                 return JSONResponse(
                     {"error": "郵件發送失敗，請稍後再試或直接來信至 aiagent168168@gmail.com"},
-                    status_code=500
+                    status_code=503
                 )
                 
         except Exception as e:
             logger.error(f"處理聯繫表單時發生錯誤: {e}", exc_info=True)
+            # 返回更詳細的錯誤訊息（僅在開發環境）
+            error_message = "伺服器錯誤，請稍後再試"
+            if os.getenv("DEBUG", "false").lower() == "true":
+                error_message = f"伺服器錯誤: {str(e)}"
             return JSONResponse(
-                {"error": "伺服器錯誤，請稍後再試"},
+                {"error": error_message},
                 status_code=500
             )
 
