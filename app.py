@@ -1113,10 +1113,21 @@ def send_email(
     
     # 驗證 Gmail 應用程式密碼格式（應該是 16 個字符，不含空格）
     if SMTP_HOST == "smtp.gmail.com" and SMTP_PASSWORD:
-        # 移除所有空格後檢查長度
-        password_clean = SMTP_PASSWORD.replace(" ", "").replace("-", "")
-        if len(password_clean) != 16:
-            logger.warning(f"Gmail 應用程式密碼長度異常：當前為 {len(password_clean)} 個字符，應該是 16 個字符。請確認是否使用了正確的應用程式密碼。")
+        # 移除所有空格和連字符後檢查長度
+        password_clean = SMTP_PASSWORD.replace(" ", "").replace("-", "").strip()
+        password_length = len(password_clean)
+        
+        # 記錄密碼資訊（不記錄完整密碼，只記錄長度和前後字符）
+        if password_length > 0:
+            masked_password = password_clean[0] + "*" * (password_length - 2) + password_clean[-1] if password_length > 2 else "*" * password_length
+            logger.info(f"SMTP 密碼檢查：長度={password_length}，格式={masked_password}，用戶={SMTP_USER}")
+        
+        if password_length != 16:
+            logger.error(f"❌ Gmail 應用程式密碼長度錯誤：當前為 {password_length} 個字符，應該是 16 個字符。請確認是否使用了正確的應用程式密碼。")
+            logger.error(f"   提示：Gmail 應用程式密碼應該是 16 個字符（不含空格），格式如：tefffaryptirguna")
+            return False
+        else:
+            logger.info(f"✅ Gmail 應用程式密碼格式正確：16 個字符")
     
     # 清理郵件地址（去除前後空格和換行符）
     to_email = to_email.strip() if to_email else ""
@@ -1146,10 +1157,17 @@ def send_email(
             msg.attach(html_part)
         
         # 發送郵件
+        logger.info(f"正在連接到 SMTP 伺服器：{SMTP_HOST}:{SMTP_PORT}")
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            logger.info("已連接到 SMTP 伺服器，正在啟用 TLS...")
             server.starttls()  # 啟用 TLS
-            server.login(SMTP_USER, SMTP_PASSWORD)
+            logger.info("TLS 已啟用，正在進行認證...")
+            # 清理密碼（移除空格和連字符）
+            password_clean = SMTP_PASSWORD.replace(" ", "").replace("-", "").strip()
+            server.login(SMTP_USER, password_clean)
+            logger.info("SMTP 認證成功")
             server.send_message(msg)
+            logger.info("郵件已成功發送")
         
         logger.info(f"郵件已成功發送到: {to_email}")
         return True
