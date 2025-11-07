@@ -8405,6 +8405,69 @@ def create_app() -> FastAPI:
             logger.error(f"獲取訂單列表失敗: {e}", exc_info=True)
             return JSONResponse({"error": "服務器錯誤，請稍後再試"}, status_code=500)
 
+    @app.get("/api/user/orders/{order_id}")
+    async def get_order_detail(order_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
+        """獲取單筆訂單詳情"""
+        if not current_user_id:
+            return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 查詢訂單（驗證訂單屬於當前用戶）
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT id, order_id, plan_type, amount, currency, payment_method, 
+                           payment_status, paid_at, expires_at, invoice_number, 
+                           invoice_type, vat_number, name, email, phone, note, created_at
+                    FROM orders 
+                    WHERE order_id = %s AND user_id = %s
+                """, (order_id, current_user_id))
+            else:
+                cursor.execute("""
+                    SELECT id, order_id, plan_type, amount, currency, payment_method, 
+                           payment_status, paid_at, expires_at, invoice_number, 
+                           invoice_type, vat_number, name, email, phone, note, created_at
+                    FROM orders 
+                    WHERE order_id = ? AND user_id = ?
+                """, (order_id, current_user_id))
+            
+            row = cursor.fetchone()
+            conn.close()
+            
+            if not row:
+                return JSONResponse({"error": "訂單不存在或無權限訪問"}, status_code=404)
+            
+            # 構建訂單詳情
+            order = {
+                "id": row[0],
+                "order_id": row[1],
+                "plan_type": row[2],
+                "amount": row[3],
+                "currency": row[4],
+                "payment_method": row[5],
+                "payment_status": row[6],
+                "paid_at": str(row[7]) if row[7] else None,
+                "expires_at": str(row[8]) if row[8] else None,
+                "invoice_number": row[9],
+                "invoice_type": row[10],
+                "vat_number": row[11],
+                "name": row[12],
+                "email": row[13],
+                "phone": row[14],
+                "note": row[15],
+                "created_at": str(row[16]) if row[16] else None
+            }
+            
+            return {"order": order}
+        except Exception as e:
+            logger.error(f"獲取訂單詳情失敗: {e}", exc_info=True)
+            return JSONResponse({"error": "服務器錯誤，請稍後再試"}, status_code=500)
+
     @app.get("/api/user/subscription")
     async def get_subscription_status(current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取當前用戶的訂閱狀態（簡化版，自動從 token 取得 user_id）"""
