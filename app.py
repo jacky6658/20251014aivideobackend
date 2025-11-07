@@ -6695,7 +6695,53 @@ def create_app() -> FastAPI:
         {inputs}
     </form>
     <script>
-        document.getElementById("ecpayForm").submit();
+        // 立即提交表單
+        (function() {{
+            try {{
+                const form = document.getElementById("ecpayForm");
+                if (form) {{
+                    // 立即提交
+                    form.submit();
+                    
+                    // 如果 5 秒後還在這個頁面，顯示錯誤訊息
+                    setTimeout(function() {{
+                        if (document.getElementById("ecpayForm")) {{
+                            document.querySelector(".container").innerHTML = `
+                                <h2 style="color: #dc2626;">跳轉失敗</h2>
+                                <p>無法連接到付款頁面，請檢查網路連線或稍後再試</p>
+                                <button onclick="document.getElementById('ecpayForm').submit()" style="
+                                    padding: 12px 24px;
+                                    background: #667eea;
+                                    color: white;
+                                    border: none;
+                                    border-radius: 8px;
+                                    cursor: pointer;
+                                    font-size: 16px;
+                                    margin-top: 20px;
+                                ">重新嘗試</button>
+                                <p style="margin-top: 20px; font-size: 14px; color: #666;">
+                                    <a href="/checkout.html?plan={plan}" style="color: #667eea;">返回付款頁面</a>
+                                </p>
+                            `;
+                        }}
+                    }}, 5000);
+                }} else {{
+                    document.querySelector(".container").innerHTML = `
+                        <h2 style="color: #dc2626;">錯誤</h2>
+                        <p>無法載入付款表單</p>
+                        <a href="/checkout.html?plan={plan}" style="color: #667eea; margin-top: 20px; display: inline-block;">返回付款頁面</a>
+                    `;
+                }}
+            }} catch (error) {{
+                console.error("提交表單時發生錯誤:", error);
+                document.querySelector(".container").innerHTML = `
+                    <h2 style="color: #dc2626;">錯誤</h2>
+                    <p>提交付款表單時發生錯誤，請稍後再試</p>
+                    <p style="color: #666; font-size: 12px; margin-top: 10px;">錯誤詳情: ${{error.message}}</p>
+                    <a href="/checkout.html?plan={plan}" style="color: #667eea; margin-top: 20px; display: inline-block;">返回付款頁面</a>
+                `;
+            }}
+        }})();
     </script>
 </body>
 </html>'''
