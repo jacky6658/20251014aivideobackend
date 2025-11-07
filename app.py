@@ -1111,6 +1111,13 @@ def send_email(
         logger.error("SMTP 帳號或密碼未設定，無法發送郵件")
         return False
     
+    # 驗證 Gmail 應用程式密碼格式（應該是 16 個字符，不含空格）
+    if SMTP_HOST == "smtp.gmail.com" and SMTP_PASSWORD:
+        # 移除所有空格後檢查長度
+        password_clean = SMTP_PASSWORD.replace(" ", "").replace("-", "")
+        if len(password_clean) != 16:
+            logger.warning(f"Gmail 應用程式密碼長度異常：當前為 {len(password_clean)} 個字符，應該是 16 個字符。請確認是否使用了正確的應用程式密碼。")
+    
     # 清理郵件地址（去除前後空格和換行符）
     to_email = to_email.strip() if to_email else ""
     
@@ -1148,7 +1155,11 @@ def send_email(
         return True
         
     except smtplib.SMTPAuthenticationError as e:
-        logger.error(f"SMTP 認證失敗: {e}")
+        error_msg = str(e)
+        logger.error(f"SMTP 認證失敗: {error_msg}")
+        # Gmail 特定錯誤訊息
+        if "Username and Password not accepted" in error_msg or "535" in error_msg:
+            logger.error("Gmail 認證失敗：請確認使用「應用程式密碼」而非一般密碼。請前往 Google 帳戶 > 安全性 > 兩步驟驗證 > 應用程式密碼，生成專用密碼。")
         return False
     except smtplib.SMTPException as e:
         logger.error(f"SMTP 錯誤: {e}")
@@ -6647,6 +6658,9 @@ def create_app() -> FastAPI:
             trade_date = get_taiwan_time().strftime("%Y/%m/%d %H:%M:%S")
             item_name = f"ReelMind {'月費' if plan == 'monthly' else '年費'}方案"
             
+            # 記錄 ECPay 設定狀態（用於調試）
+            logger.info(f"ECPay 設定檢查: MerchantID={ECPAY_MERCHANT_ID[:4] if ECPAY_MERCHANT_ID else 'None'}..., API={ECPAY_API}, 金額={amount}")
+            
             ecpay_data = {
                 "MerchantID": ECPAY_MERCHANT_ID,
                 "MerchantTradeNo": trade_no,
@@ -6657,13 +6671,23 @@ def create_app() -> FastAPI:
                 "ItemName": item_name,
                 "ReturnURL": ECPAY_NOTIFY_URL,  # 伺服器端通知
                 "OrderResultURL": f"{ECPAY_RETURN_URL}?order_id={trade_no}",  # 用戶返回頁
-                "ChoosePayment": "ALL",  # 讓用戶自行選擇付款方式（信用卡、LINE Pay、Apple Pay、ATM、超商等）
+                "ChoosePayment": "Credit",  # 先嘗試只使用信用卡付款（如果 ALL 沒有權限）
+                # 如果 Credit 不行，可以嘗試：Credit, ATM, CVS, BARCODE 等單一付款方式
+                # "ChoosePayment": "ALL",  # 讓用戶自行選擇付款方式（需要所有付款方式都已開通）
                 "EncryptType": 1,
                 "ClientBackURL": ECPAY_RETURN_URL,  # 取消付款返回頁
             }
             
+            # 記錄發送到 ECPay 的參數（隱藏敏感資訊）
+            logger.debug(f"ECPay 參數: MerchantID={ECPAY_MERCHANT_ID}, TradeNo={trade_no}, Amount={amount}, ChoosePayment=ALL")
+            
             # 生成簽章
-            ecpay_data["CheckMacValue"] = gen_check_mac_value(ecpay_data)
+            try:
+                ecpay_data["CheckMacValue"] = gen_check_mac_value(ecpay_data)
+                logger.debug(f"ECPay 簽章生成成功")
+            except Exception as e:
+                logger.error(f"ECPay 簽章生成失敗: {e}")
+                return HTMLResponse("<html><body><h1>付款系統錯誤，請聯繫客服</h1></body></html>", status_code=500)
             
             # 生成 HTML 表單（自動提交到 ECPay）
             inputs = "\n".join([f'<input type="hidden" name="{k}" value="{v}"/>' for k, v in ecpay_data.items()])
@@ -8986,12 +9010,27 @@ def create_app() -> FastAPI:
                         "message": "您的訊息已成功發送，我們會在 24 小時內回覆您"
                     })
                 else:
-                    # 郵件發送失敗，但不返回 500，而是返回友好的錯誤訊息
+                    # 郵件發送失敗，檢查是否是認證問題
                     logger.error(f"郵件發送失敗，但表單資料已記錄。Email: {email}, Name: {name}")
+                    
+                    # 檢查 SMTP 設定
+                    if not SMTP_USER or not SMTP_PASSWORD:
+                        error_msg = "郵件服務未配置，請直接來信至 aiagent168168@gmail.com"
+                    else:
+                        # 可能是認證問題，提供更詳細的錯誤訊息
+                        error_msg = "郵件發送失敗（可能是 SMTP 認證問題），請直接來信至 aiagent168168@gmail.com。如需設定 Gmail，請使用「應用程式密碼」而非一般密碼。"
+                    
                     return JSONResponse(
-                        {"error": "郵件發送失敗，請稍後再試或直接來信至 aiagent168168@gmail.com"},
+                        {"error": error_msg},
                         status_code=503
                     )
+            except smtplib.SMTPAuthenticationError as auth_error:
+                # Gmail 認證錯誤
+                logger.error(f"Gmail SMTP 認證失敗: {auth_error}", exc_info=True)
+                return JSONResponse(
+                    {"error": "郵件服務認證失敗。請確認 SMTP_USER 和 SMTP_PASSWORD 設定正確。Gmail 需要使用「應用程式密碼」而非一般密碼。請直接來信至 aiagent168168@gmail.com"},
+                    status_code=503
+                )
             except Exception as email_error:
                 logger.error(f"發送郵件時發生異常: {email_error}", exc_info=True)
                 return JSONResponse(
