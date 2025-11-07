@@ -522,14 +522,16 @@ def init_database():
         else:
             print(f"WARNING: 無法新增 is_subscribed 欄位: {e}")
     
-    # 將所有現有用戶的訂閱狀態設為 1（已訂閱）
-    try:
-        cursor.execute("UPDATE user_auth SET is_subscribed = 1 WHERE is_subscribed IS NULL OR is_subscribed = 0")
-        updated_count = cursor.rowcount
-        if updated_count > 0:
-            print(f"INFO: 已將 {updated_count} 個用戶設為已訂閱")
-    except Exception as e:
-        print(f"INFO: 更新訂閱狀態時出現錯誤（可能是表格為空）: {e}")
+    # 安全修復：移除自動將所有用戶設為已訂閱的邏輯
+    # 這是一個嚴重的安全漏洞，會讓所有用戶自動獲得訂閱權限
+    # 如果需要初始化訂閱狀態，應該通過管理員手動操作或特定的遷移腳本
+    # try:
+    #     cursor.execute("UPDATE user_auth SET is_subscribed = 1 WHERE is_subscribed IS NULL OR is_subscribed = 0")
+    #     updated_count = cursor.rowcount
+    #     if updated_count > 0:
+    #         print(f"INFO: 已將 {updated_count} 個用戶設為已訂閱")
+    # except Exception as e:
+    #     print(f"INFO: 更新訂閱狀態時出現錯誤（可能是表格為空）: {e}")
     
     # 創建帳號定位記錄表
     execute_sql("""
@@ -6819,8 +6821,9 @@ def create_app() -> FastAPI:
             
             # 檢查付款狀態
             if str(rtn_code) != "1":
-                logger.warning(f"ECPay 付款失敗，訂單號: {merchant_trade_no}, RtnCode: {rtn_code}")
+                logger.warning(f"ECPay 付款失敗，訂單號: {merchant_trade_no}, RtnCode: {rtn_code}, RtnMsg: {params.get('RtnMsg', '')}")
                 # 仍然更新訂單狀態為 failed，並儲存原始資料
+                # 重要：絕對不要更新訂閱狀態或 licenses 表
                 try:
                     conn = get_db_connection()
                     cursor = conn.cursor()
@@ -6847,6 +6850,7 @@ def create_app() -> FastAPI:
                     conn.commit()
                     cursor.close()
                     conn.close()
+                    logger.info(f"已將訂單 {merchant_trade_no} 標記為失敗，未更新訂閱狀態")
                 except Exception as e:
                     logger.error(f"更新失敗訂單狀態時出錯: {e}")
                 
@@ -6934,8 +6938,10 @@ def create_app() -> FastAPI:
                     return PlainTextResponse("1|OK")
                 
                 # 處理信用卡/LINE Pay/Apple Pay 或 ATM/超商付款完成
-                if is_credit_linepay or (is_atm_cvs and current_status == "pending" and rtn_code == "1"):
-                    # 這是付款完成的回調
+                # 重要：只有在 rtn_code == "1" 且付款狀態確實為成功時，才更新訂閱狀態
+                if (is_credit_linepay or (is_atm_cvs and current_status == "pending")) and str(rtn_code) == "1":
+                    # 這是付款完成的回調，確認付款成功
+                    logger.info(f"確認付款成功，開始更新訂閱狀態，訂單號: {merchant_trade_no}, user_id: {user_id}")
                     
                     # 計算到期日
                     days = 30 if plan_type == "monthly" else 365
@@ -7155,10 +7161,15 @@ def create_app() -> FastAPI:
     # ===== 多通路授權整合 API =====
     
     @app.post("/api/webhook/verify-license")
+    @rate_limit("10/minute")  # 添加速率限制
     async def verify_license_webhook(request: Request):
         """接收 n8n/Portaly/PPA 的授權通知，產生授權連結
         
         這個端點由 n8n 調用，用於建立授權記錄並生成授權連結。
+        
+        安全驗證：
+        - 需要提供 WEBHOOK_SECRET 環境變數作為 API Key
+        - 請求必須包含 X-Webhook-Secret header 或 secret 參數
         
         請求參數：
         - channel: 通路名稱（例如：portaly, ppa, n8n）
@@ -7167,14 +7178,43 @@ def create_app() -> FastAPI:
         - plan_type: 方案類型（monthly/yearly），預設為 yearly（1年）
         - amount: 金額（可選）
         - product_name: 產品名稱（可選）
+        - secret: Webhook 密鑰（可選，也可以通過 X-Webhook-Secret header 提供）
         
         返回：
         - activation_token: 授權 token
         - activation_link: 授權連結（可直接寄送給用戶）
         - expires_at: 授權到期時間
         """
+        # 安全驗證：檢查 Webhook Secret
+        WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+        body_bytes = None
+        body = None
+        
+        if WEBHOOK_SECRET:
+            # 優先從 header 獲取 secret（推薦方式）
+            provided_secret = request.headers.get("X-Webhook-Secret", "")
+            
+            # 如果 header 沒有，嘗試從 body 獲取（需要先讀取 body）
+            if not provided_secret:
+                try:
+                    body_bytes = await request.body()
+                    if body_bytes:
+                        import json
+                        body_data = json.loads(body_bytes.decode())
+                        provided_secret = body_data.get("secret", "")
+                        # 保存解析後的 body 數據，以便後續使用
+                        body = body_data
+                except Exception as e:
+                    logger.warning(f"解析 webhook body 失敗: {e}")
+            
+            if provided_secret != WEBHOOK_SECRET:
+                logger.warning(f"Webhook 驗證失敗：無效的 secret，IP: {request.client.host if request.client else 'unknown'}")
+                return JSONResponse({"error": "未授權的請求"}, status_code=401)
+        
         try:
-            body = await request.json()
+            # 如果已經讀取了 body（為了驗證 secret），直接使用
+            if body is None:
+                body = await request.json()
             channel = body.get("channel", "n8n")  # 預設為 n8n
             order_id = body.get("order_id")
             email = body.get("email")
@@ -7262,7 +7302,9 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": f"處理失敗: {str(e)}"}, status_code=500)
     
     @app.get("/api/user/license/verify")
+    @rate_limit("10/minute")  # 添加速率限制
     async def verify_license_token(
+        request: Request,
         token: str,
         current_user_id: Optional[str] = Depends(get_current_user)
     ):
@@ -7273,9 +7315,22 @@ def create_app() -> FastAPI:
         2. 檢查是否已使用或過期
         3. 如果用戶未登入，導向登入頁
         4. 如果用戶已登入，啟用訂閱並更新 licenses 表
+        
+        安全措施：
+        - Token 驗證（必須是有效的授權 token）
+        - 一次性使用（使用後立即失效）
+        - 過期檢查（7天有效期限）
+        - 速率限制（10次/分鐘）
+        - 日誌記錄所有授權操作
+        - 輸入驗證（防止 SQL 注入）
         """
         if not token:
             return JSONResponse({"error": "缺少授權 token"}, status_code=400)
+        
+        # 驗證 token 格式（防止 SQL 注入和異常輸入）
+        if len(token) > 200 or not all(c.isalnum() or c in '-_' for c in token):
+            logger.warning(f"無效的 token 格式，可能為攻擊嘗試，IP: {request.client.host if request.client else 'unknown'}, token_length: {len(token)}")
+            return JSONResponse({"error": "無效的授權連結格式"}, status_code=400)
         
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -7438,6 +7493,9 @@ def create_app() -> FastAPI:
                         (current_user_id,)
                     )
                     logger.info(f"授權驗證時更新用戶訂閱狀態: user_id={current_user_id}")
+            
+            # 記錄授權操作（安全審計）
+            logger.info(f"授權驗證成功: user_id={current_user_id}, activation_id={activation_id}, channel={channel}, order_id={order_id}, IP={request.client.host if request.client else 'unknown'}")
             
             # 自動建立 orders 記錄（讓後台管理系統可以看到購買記錄）
             try:
@@ -7676,14 +7734,41 @@ def create_app() -> FastAPI:
     
     # ===== 舊的金流回調（保留向後兼容，建議移除） =====
     @app.post("/api/payment/callback")
-    async def payment_callback(payload: dict):
+    @rate_limit("5/minute")  # 添加速率限制
+    async def payment_callback(request: Request, payload: dict = None):
         """金流回調（測試/準備用）：更新用戶訂閱狀態與到期日。
+        
+        ⚠️ 安全警告：此端點已禁用，請使用 ECPay Webhook 端點
+        
         期待參數：
         - user_id: str
         - plan: 'monthly' | 'yearly'
         - transaction_id, amount, paid_at（可選，用於記錄）
-        注意：正式上線需加入簽章驗證與來源白名單。
+        
+        安全措施：
+        - 需要 PAYMENT_CALLBACK_SECRET 環境變數
+        - 需要提供 X-Callback-Secret header
+        - 已添加速率限制
         """
+        # 安全驗證：檢查 Callback Secret
+        CALLBACK_SECRET = os.getenv("PAYMENT_CALLBACK_SECRET", "")
+        if CALLBACK_SECRET:
+            provided_secret = request.headers.get("X-Callback-Secret", "")
+            if provided_secret != CALLBACK_SECRET:
+                logger.warning(f"Payment callback 驗證失敗：無效的 secret，IP: {request.client.host if request.client else 'unknown'}")
+                return JSONResponse({"error": "未授權的請求"}, status_code=401)
+        else:
+            # 如果沒有設定 secret，完全禁用此端點（生產環境必須設定）
+            logger.error("PAYMENT_CALLBACK_SECRET 未設定，此端點已禁用")
+            return JSONResponse({"error": "此端點已禁用，請使用 ECPay Webhook"}, status_code=403)
+        
+        # 解析 payload
+        if payload is None:
+            try:
+                payload = await request.json()
+            except:
+                return JSONResponse({"error": "無效的請求格式"}, status_code=400)
+        
         try:
             user_id = payload.get("user_id")
             plan = payload.get("plan")
@@ -7691,8 +7776,22 @@ def create_app() -> FastAPI:
             transaction_id = payload.get("transaction_id")
             amount = payload.get("amount")
 
-            if not user_id or plan not in ("monthly", "yearly"):
-                raise HTTPException(status_code=400, detail="missing user_id or invalid plan")
+            # 輸入驗證
+            if not user_id or not isinstance(user_id, str):
+                logger.warning(f"Payment callback: 無效的 user_id，IP: {request.client.host if request.client else 'unknown'}")
+                raise HTTPException(status_code=400, detail="missing or invalid user_id")
+            
+            # 驗證 user_id 格式（防止 SQL 注入）
+            if len(user_id) > 100 or not all(c.isalnum() or c in '-_' for c in user_id):
+                logger.warning(f"Payment callback: 可疑的 user_id 格式，IP: {request.client.host if request.client else 'unknown'}, user_id: {user_id[:20] if user_id else 'None'}")
+                raise HTTPException(status_code=400, detail="invalid user_id format")
+            
+            if plan not in ("monthly", "yearly"):
+                logger.warning(f"Payment callback: 無效的 plan，IP: {request.client.host if request.client else 'unknown'}, plan: {plan}")
+                raise HTTPException(status_code=400, detail="invalid plan")
+            
+            # 記錄操作（安全審計）
+            logger.info(f"Payment callback 處理: user_id={user_id}, plan={plan}, IP={request.client.host if request.client else 'unknown'}")
 
             # 計算到期日
             days = 30 if plan == "monthly" else 365
