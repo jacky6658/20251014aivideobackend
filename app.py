@@ -2429,6 +2429,7 @@ def create_app() -> FastAPI:
             "/api/health",
             "/api/auth/google/callback",
             "/api/auth/google/callback-post",
+            "/api/admin/auth/login",  # 管理員登入端點（用戶尚未登入，無法獲取 CSRF Token）
             "/api/payment/webhook",  # ECPay Webhook（使用簽章驗證）
             "/api/webhook/verify-license",  # n8n Webhook（使用 secret 驗證）
         ]
