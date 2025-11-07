@@ -1084,6 +1084,68 @@ def validate_email(email: str) -> bool:
     return bool(re.match(email_pattern, email))
 
 
+def validate_text_length(text: str, max_length: int = 10000, min_length: int = 0) -> bool:
+    """驗證文本長度
+    
+    Args:
+        text: 文本字串
+        max_length: 最大長度
+        min_length: 最小長度
+    
+    Returns:
+        是否有效
+    """
+    if not isinstance(text, str):
+        return False
+    return min_length <= len(text) <= max_length
+
+
+def validate_plan_type(plan: str) -> bool:
+    """驗證方案類型
+    
+    Args:
+        plan: 方案類型字串
+    
+    Returns:
+        是否有效
+    """
+    return plan in ("monthly", "yearly")
+
+
+# ===== 統一錯誤處理函數 =====
+
+def handle_error_response(
+    error: Exception,
+    error_type: str = "server_error",
+    user_message: str = "伺服器錯誤，請稍後再試",
+    status_code: int = 500,
+    log_details: bool = True
+) -> JSONResponse:
+    """統一的錯誤處理函數
+    
+    Args:
+        error: 異常對象
+        error_type: 錯誤類型（用於日誌分類）
+        user_message: 返回給用戶的錯誤信息
+        status_code: HTTP 狀態碼
+        log_details: 是否記錄詳細錯誤到日誌
+    
+    Returns:
+        JSONResponse 錯誤響應
+    """
+    if log_details:
+        logger.error(f"{error_type}: {str(error)}", exc_info=True)
+    
+    # 只在開發環境返回詳細錯誤
+    if os.getenv("DEBUG", "false").lower() == "true":
+        user_message = f"{user_message} (詳細: {str(error)})"
+    
+    return JSONResponse(
+        {"error": user_message},
+        status_code=status_code
+    )
+
+
 # ===== 郵件發送功能 =====
 
 def send_email(
@@ -2270,9 +2332,15 @@ def create_app() -> FastAPI:
     async def root():
         return {"message": "AI Video Backend is running"}
     
+    # 除錯端點（生產環境應移除或保護）
+    # 建議：只在開發環境啟用，或添加管理員權限保護
     @app.get("/api/debug/env")
-    async def debug_env():
-        """除錯環境變數"""
+    async def debug_env(current_user_id: Optional[str] = Depends(get_admin_user)):
+        """除錯環境變數（僅管理員可訪問）"""
+        # 只在開發環境或管理員可訪問
+        if os.getenv("DEBUG", "false").lower() != "true" and not current_user_id:
+            raise HTTPException(status_code=403, detail="無權限訪問")
+        
         return {
             "GOOGLE_CLIENT_ID": GOOGLE_CLIENT_ID,
             "GOOGLE_CLIENT_SECRET": "***" if GOOGLE_CLIENT_SECRET else None,
@@ -2326,7 +2394,26 @@ def create_app() -> FastAPI:
         api_key = user_api_key or os.getenv("GEMINI_API_KEY")
         
         if not api_key:
-            return JSONResponse({"error": "Missing GEMINI_API_KEY in .env"}, status_code=500)
+            logger.error("Missing GEMINI_API_KEY in .env for generate_positioning")
+            return JSONResponse({"error": "服務器配置錯誤，請聯繫管理員"}, status_code=500)
+
+        # 驗證用戶 ID（如果提供）
+        if user_id and not validate_user_id(user_id):
+            logger.warning(f"無效的用戶 ID: {user_id}")
+            return JSONResponse({"error": "無效的用戶資訊"}, status_code=400)
+
+        # 驗證輸入參數長度
+        if body.platform and not validate_text_length(body.platform, max_length=50):
+            logger.warning(f"平台名稱過長: {len(body.platform) if body.platform else 0} 字符")
+            return JSONResponse({"error": "平台名稱過長（最多 50 字符）"}, status_code=400)
+        
+        if body.topic and not validate_text_length(body.topic, max_length=200):
+            logger.warning(f"主題過長: {len(body.topic) if body.topic else 0} 字符")
+            return JSONResponse({"error": "主題過長（最多 200 字符）"}, status_code=400)
+        
+        if body.profile and not validate_text_length(body.profile, max_length=1000):
+            logger.warning(f"帳號定位描述過長: {len(body.profile) if body.profile else 0} 字符")
+            return JSONResponse({"error": "帳號定位描述過長（最多 1000 字符）"}, status_code=400)
 
         # 專門的帳號定位提示詞
         positioning_prompt = f"""
@@ -2381,7 +2468,12 @@ def create_app() -> FastAPI:
 
             return StreamingResponse(generate(), media_type="text/plain")
         except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+            return handle_error_response(
+                e,
+                error_type="generate_positioning_error",
+                user_message="生成帳號定位時發生錯誤，請稍後再試",
+                status_code=500
+            )
 
     @app.post("/api/generate/topics")
     @rate_limit("10/minute")
@@ -2395,7 +2487,26 @@ def create_app() -> FastAPI:
         api_key = user_api_key or os.getenv("GEMINI_API_KEY")
         
         if not api_key:
-            return JSONResponse({"error": "Missing GEMINI_API_KEY in .env"}, status_code=500)
+            logger.error("Missing GEMINI_API_KEY in .env for generate_topics")
+            return JSONResponse({"error": "服務器配置錯誤，請聯繫管理員"}, status_code=500)
+
+        # 驗證用戶 ID（如果提供）
+        if user_id and not validate_user_id(user_id):
+            logger.warning(f"無效的用戶 ID: {user_id}")
+            return JSONResponse({"error": "無效的用戶資訊"}, status_code=400)
+
+        # 驗證輸入參數長度
+        if body.platform and not validate_text_length(body.platform, max_length=50):
+            logger.warning(f"平台名稱過長: {len(body.platform) if body.platform else 0} 字符")
+            return JSONResponse({"error": "平台名稱過長（最多 50 字符）"}, status_code=400)
+        
+        if body.topic and not validate_text_length(body.topic, max_length=200):
+            logger.warning(f"主題過長: {len(body.topic) if body.topic else 0} 字符")
+            return JSONResponse({"error": "主題過長（最多 200 字符）"}, status_code=400)
+        
+        if body.profile and not validate_text_length(body.profile, max_length=1000):
+            logger.warning(f"帳號定位描述過長: {len(body.profile) if body.profile else 0} 字符")
+            return JSONResponse({"error": "帳號定位描述過長（最多 1000 字符）"}, status_code=400)
 
         # 專門的選題推薦提示詞
         topics_prompt = f"""
@@ -2449,7 +2560,12 @@ def create_app() -> FastAPI:
 
             return StreamingResponse(generate(), media_type="text/plain")
         except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+            return handle_error_response(
+                e,
+                error_type="generate_topics_error",
+                user_message="生成選題推薦時發生錯誤，請稍後再試",
+                status_code=500
+            )
 
     @app.post("/api/generate/script")
     @rate_limit("10/minute")
@@ -2519,7 +2635,12 @@ def create_app() -> FastAPI:
 
             return StreamingResponse(generate(), media_type="text/plain")
         except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+            return handle_error_response(
+                e,
+                error_type="generate_script_error",
+                user_message="生成腳本時發生錯誤，請稍後再試",
+                status_code=500
+            )
 
     @app.post("/api/chat/stream")
     @rate_limit("30/minute")
@@ -2533,7 +2654,31 @@ def create_app() -> FastAPI:
         api_key = user_api_key or os.getenv("GEMINI_API_KEY")
         
         if not api_key:
-            return JSONResponse({"error": "Missing GEMINI_API_KEY in .env"}, status_code=500)
+            logger.error("Missing GEMINI_API_KEY in .env for stream_chat")
+            return JSONResponse({"error": "服務器配置錯誤，請聯繫管理員"}, status_code=500)
+
+        # 驗證用戶 ID（如果提供）
+        if user_id and not validate_user_id(user_id):
+            logger.warning(f"無效的用戶 ID: {user_id}")
+            return JSONResponse({"error": "無效的用戶資訊"}, status_code=400)
+
+        # 驗證消息長度
+        if not body.message or not validate_text_length(body.message, max_length=5000):
+            logger.warning(f"消息長度無效: {len(body.message) if body.message else 0} 字符")
+            return JSONResponse({"error": "消息長度無效（最多 5000 字符）"}, status_code=400)
+
+        # 驗證輸入參數長度
+        if body.platform and not validate_text_length(body.platform, max_length=50):
+            logger.warning(f"平台名稱過長: {len(body.platform) if body.platform else 0} 字符")
+            return JSONResponse({"error": "平台名稱過長（最多 50 字符）"}, status_code=400)
+        
+        if body.topic and not validate_text_length(body.topic, max_length=200):
+            logger.warning(f"主題過長: {len(body.topic) if body.topic else 0} 字符")
+            return JSONResponse({"error": "主題過長（最多 200 字符）"}, status_code=400)
+        
+        if body.profile and not validate_text_length(body.profile, max_length=1000):
+            logger.warning(f"帳號定位描述過長: {len(body.profile) if body.profile else 0} 字符")
+            return JSONResponse({"error": "帳號定位描述過長（最多 1000 字符）"}, status_code=400)
         
         # === 整合記憶系統 ===
         # 1. 載入短期記憶（STM）- 最近對話上下文
@@ -2626,18 +2771,36 @@ def create_app() -> FastAPI:
     @app.get("/api/user/memory/{user_id}")
     async def get_user_memory_api(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶的長期記憶資訊"""
+        # 驗證用戶 ID
+        if not validate_user_id(user_id):
+            logger.warning(f"無效的用戶 ID: {user_id}")
+            return JSONResponse({"error": "無效的用戶資訊"}, status_code=400)
+        
         if not current_user_id or current_user_id != user_id:
+            logger.warning(f"無權限訪問用戶記憶: current_user={current_user_id}, requested_user={user_id}")
             return JSONResponse({"error": "無權限訪問此用戶資料"}, status_code=403)
         try:
             memory = get_user_memory(user_id)
             return {"user_id": user_id, "memory": memory}
         except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+            return handle_error_response(
+                e,
+                error_type="get_user_memory_error",
+                user_message="獲取用戶記憶時發生錯誤，請稍後再試",
+                status_code=500
+            )
     
     @app.get("/api/user/conversations/{user_id}")
+    @rate_limit("30/minute")  # 添加 Rate Limiting
     async def get_user_conversations(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶的對話記錄"""
+        # 驗證用戶 ID
+        if not validate_user_id(user_id):
+            logger.warning(f"無效的用戶 ID: {user_id}")
+            return JSONResponse({"error": "無效的用戶資訊"}, status_code=400)
+        
         if not current_user_id or current_user_id != user_id:
+            logger.warning(f"無權限訪問用戶對話記錄: current_user={current_user_id}, requested_user={user_id}")
             return JSONResponse({"error": "無權限訪問此用戶資料"}, status_code=403)
         try:
             conn = get_db_connection()
@@ -2687,14 +2850,25 @@ def create_app() -> FastAPI:
                 "conversations": result
             }
         except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+            return handle_error_response(
+                e,
+                error_type="get_user_conversations_error",
+                user_message="獲取對話記錄時發生錯誤，請稍後再試",
+                status_code=500
+            )
 
     # ===== 用戶歷史API端點 =====
     
     @app.get("/api/user/generations/{user_id}")
     async def get_user_generations(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶的生成記錄"""
+        # 驗證用戶 ID
+        if not validate_user_id(user_id):
+            logger.warning(f"無效的用戶 ID: {user_id}")
+            return JSONResponse({"error": "無效的用戶資訊"}, status_code=400)
+        
         if not current_user_id or current_user_id != user_id:
+            logger.warning(f"無權限訪問用戶生成記錄: current_user={current_user_id}, requested_user={user_id}")
             return JSONResponse({"error": "無權限訪問此用戶資料"}, status_code=403)
         try:
             conn = get_db_connection()
@@ -2734,12 +2908,23 @@ def create_app() -> FastAPI:
                 ]
             }
         except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+            return handle_error_response(
+                e,
+                error_type="get_user_generations_error",
+                user_message="獲取生成記錄時發生錯誤，請稍後再試",
+                status_code=500
+            )
 
     @app.get("/api/user/preferences/{user_id}")
     async def get_user_preferences(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶的偏好設定"""
+        # 驗證用戶 ID
+        if not validate_user_id(user_id):
+            logger.warning(f"無效的用戶 ID: {user_id}")
+            return JSONResponse({"error": "無效的用戶資訊"}, status_code=400)
+        
         if not current_user_id or current_user_id != user_id:
+            logger.warning(f"無權限訪問用戶偏好: current_user={current_user_id}, requested_user={user_id}")
             return JSONResponse({"error": "無權限訪問此用戶資料"}, status_code=403)
         try:
             conn = get_db_connection()
@@ -2768,14 +2953,25 @@ def create_app() -> FastAPI:
                 ]
             }
         except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+            return handle_error_response(
+                e,
+                error_type="get_user_preferences_error",
+                user_message="獲取用戶偏好時發生錯誤，請稍後再試",
+                status_code=500
+            )
     
     # ===== 短期記憶（STM）API =====
     
     @app.get("/api/user/stm/{user_id}")
     async def get_user_stm(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶的短期記憶（當前會話記憶）"""
+        # 驗證用戶 ID
+        if not validate_user_id(user_id):
+            logger.warning(f"無效的用戶 ID: {user_id}")
+            return JSONResponse({"error": "無效的用戶資訊"}, status_code=400)
+        
         if not current_user_id or current_user_id != user_id:
+            logger.warning(f"無權限訪問用戶短期記憶: current_user={current_user_id}, requested_user={user_id}")
             return JSONResponse({"error": "無權限訪問此用戶資料"}, status_code=403)
         try:
             memory = stm.load_memory(user_id)
@@ -2789,18 +2985,34 @@ def create_app() -> FastAPI:
                 }
             }
         except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+            return handle_error_response(
+                e,
+                error_type="get_user_stm_error",
+                user_message="獲取短期記憶時發生錯誤，請稍後再試",
+                status_code=500
+            )
     
     @app.delete("/api/user/stm/{user_id}")
     async def clear_user_stm(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """清除用戶的短期記憶"""
+        # 驗證用戶 ID
+        if not validate_user_id(user_id):
+            logger.warning(f"無效的用戶 ID: {user_id}")
+            return JSONResponse({"error": "無效的用戶資訊"}, status_code=400)
+        
         if not current_user_id or current_user_id != user_id:
+            logger.warning(f"無權限清除用戶短期記憶: current_user={current_user_id}, requested_user={user_id}")
             return JSONResponse({"error": "無權限"}, status_code=403)
         try:
             stm.clear_memory(user_id)
             return {"message": "短期記憶已清除", "user_id": user_id}
         except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+            return handle_error_response(
+                e,
+                error_type="clear_user_stm_error",
+                user_message="清除短期記憶時發生錯誤，請稍後再試",
+                status_code=500
+            )
     
     @app.get("/api/user/memory/full/{user_id}")
     async def get_full_memory(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
@@ -6593,6 +6805,7 @@ def create_app() -> FastAPI:
     # ===== ECPay 金流串接 =====
     
     @app.post("/api/payment/checkout", response_class=HTMLResponse)
+    @rate_limit("10/minute")  # 添加 Rate Limiting
     async def create_payment_order(request: Request, current_user_id: Optional[str] = Depends(get_current_user)):
         """建立 ECPay 付款訂單並返回付款表單
         
@@ -6624,11 +6837,39 @@ def create_app() -> FastAPI:
             note = body.get("note", "")
             
             # 驗證必填欄位
-            if not plan or plan not in ("monthly", "yearly"):
+            if not plan or not validate_plan_type(plan):
+                logger.warning(f"無效的方案類型: {plan}, user_id: {current_user_id}")
                 return HTMLResponse("<html><body><h1>無效的方案類型</h1></body></html>", status_code=400)
             
-            if not name or not email:
-                return HTMLResponse("<html><body><h1>請填寫姓名和電子信箱</h1></body></html>", status_code=400)
+            # 驗證用戶 ID
+            if not validate_user_id(current_user_id):
+                logger.warning(f"無效的用戶 ID: {current_user_id}")
+                return HTMLResponse("<html><body><h1>無效的用戶資訊</h1></body></html>", status_code=400)
+            
+            # 驗證姓名長度
+            if not name or not isinstance(name, str) or len(name.strip()) == 0 or len(name) > 100:
+                logger.warning(f"無效的姓名: {name}, user_id: {current_user_id}")
+                return HTMLResponse("<html><body><h1>請填寫有效的姓名（1-100 字符）</h1></body></html>", status_code=400)
+            
+            # 驗證 Email
+            if not email or not validate_email(email):
+                logger.warning(f"無效的 Email: {email}, user_id: {current_user_id}")
+                return HTMLResponse("<html><body><h1>請填寫有效的電子信箱</h1></body></html>", status_code=400)
+            
+            # 驗證電話（如果提供）
+            if phone and (not isinstance(phone, str) or len(phone) > 20):
+                logger.warning(f"無效的電話: {phone}, user_id: {current_user_id}")
+                return HTMLResponse("<html><body><h1>電話號碼格式錯誤（最多 20 字符）</h1></body></html>", status_code=400)
+            
+            # 驗證統編（如果提供）
+            if vat and (not isinstance(vat, str) or len(vat) > 20 or not re.match(r'^[0-9]+$', vat)):
+                logger.warning(f"無效的統編: {vat}, user_id: {current_user_id}")
+                return HTMLResponse("<html><body><h1>統編格式錯誤（最多 20 位數字）</h1></body></html>", status_code=400)
+            
+            # 驗證備註長度
+            if note and (not isinstance(note, str) or len(note) > 500):
+                logger.warning(f"備註過長: {len(note) if note else 0} 字符, user_id: {current_user_id}")
+                return HTMLResponse("<html><body><h1>備註過長（最多 500 字符）</h1></body></html>", status_code=400)
             
             # 計算金額（如果未提供）
             if not amount:
@@ -6704,7 +6945,7 @@ def create_app() -> FastAPI:
                 ecpay_data["CheckMacValue"] = gen_check_mac_value(ecpay_data)
                 logger.debug(f"ECPay 簽章生成成功")
             except Exception as e:
-                logger.error(f"ECPay 簽章生成失敗: {e}")
+                logger.error(f"ECPay 簽章生成失敗: {e}", exc_info=True)
                 return HTMLResponse("<html><body><h1>付款系統錯誤，請聯繫客服</h1></body></html>", status_code=500)
             
             # 生成 HTML 表單（自動提交到 ECPay）
@@ -8505,9 +8746,16 @@ def create_app() -> FastAPI:
     # ============ 帳單資訊相關 API ============
 
     @app.get("/api/user/orders/{user_id}")
+    @rate_limit("30/minute")  # 添加 Rate Limiting
     async def get_user_orders(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶的購買記錄"""
+        # 驗證用戶 ID
+        if not validate_user_id(user_id):
+            logger.warning(f"無效的用戶 ID: {user_id}")
+            return JSONResponse({"error": "無效的用戶資訊"}, status_code=400)
+        
         if current_user_id != user_id:
+            logger.warning(f"無權限訪問用戶訂單: current_user={current_user_id}, requested_user={user_id}")
             return JSONResponse({"error": "無權限訪問此用戶資料"}, status_code=403)
         
         try:
@@ -8694,10 +8942,21 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": "服務器錯誤，請稍後再試"}, status_code=500)
 
     @app.get("/api/user/orders/{order_id}")
+    @rate_limit("30/minute")  # 添加 Rate Limiting
     async def get_order_detail(order_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取單筆訂單詳情"""
         if not current_user_id:
+            logger.warning("未授權訪問訂單詳情")
             return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        # 驗證用戶 ID 和訂單 ID
+        if not validate_user_id(current_user_id):
+            logger.warning(f"無效的用戶 ID: {current_user_id}")
+            return JSONResponse({"error": "無效的用戶資訊"}, status_code=400)
+        
+        if not order_id or len(order_id) > 50:
+            logger.warning(f"無效的訂單 ID: {order_id}")
+            return JSONResponse({"error": "無效的訂單 ID"}, status_code=400)
         
         try:
             conn = get_db_connection()
