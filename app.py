@@ -352,7 +352,7 @@ SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER")  # 發送郵件的帳號
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")  # 應用程式密碼（Gmail 需要使用應用程式密碼）或 SMTP 密碼
-CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "aiagent168168@gmail.com")  # 接收聯繫表單的郵件地址
+CONTACT_EMAIL = (os.getenv("CONTACT_EMAIL", "aiagent168168@gmail.com") or "aiagent168168@gmail.com").strip()  # 接收聯繫表單的郵件地址
 
 # 支援其他郵件服務（如果 Gmail 無法使用）
 # 例如：Outlook/Hotmail: smtp-mail.outlook.com:587
@@ -1067,6 +1067,12 @@ def validate_email(email: str) -> bool:
     if not email or not isinstance(email, str):
         return False
     
+    # 清理郵件地址（去除前後空格）
+    email = email.strip()
+    
+    if not email:
+        return False
+    
     # 長度限制
     if len(email) > 255:
         return False
@@ -1103,8 +1109,15 @@ def send_email(
         logger.error("SMTP 帳號或密碼未設定，無法發送郵件")
         return False
     
+    # 清理郵件地址（去除前後空格和換行符）
+    to_email = to_email.strip() if to_email else ""
+    
+    if not to_email:
+        logger.error("收件人郵件地址為空")
+        return False
+    
     if not validate_email(to_email):
-        logger.error(f"無效的收件人郵件地址: {to_email}")
+        logger.error(f"無效的收件人郵件地址: {to_email} (長度: {len(to_email)})")
         return False
     
     try:
@@ -6590,8 +6603,12 @@ def create_app() -> FastAPI:
             if not amount:
                 amount = 1990 if plan == "monthly" else 19900  # 預設價格
             
-            # 生成訂單號
-            trade_no = f"RM{current_user_id[:8]}{int(time.time())}{uuid.uuid4().hex[:6].upper()}"
+            # 生成訂單號（ECPay 限制最多 20 字符）
+            # 格式：RM + user_id後4位 + 時間戳後8位 + UUID前4位 = 2+4+8+4 = 18字符
+            timestamp = str(int(time.time()))[-8:]  # 取時間戳後8位
+            user_suffix = current_user_id[-4:] if len(current_user_id) >= 4 else current_user_id.zfill(4)  # 取user_id後4位
+            uuid_prefix = uuid.uuid4().hex[:4].upper()  # UUID前4位
+            trade_no = f"RM{user_suffix}{timestamp}{uuid_prefix}"
             
             # 建立訂單記錄（pending 狀態）
             conn = get_db_connection()
