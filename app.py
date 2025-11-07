@@ -14,6 +14,9 @@ import urllib.parse
 import logging
 import re
 import ipaddress
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # 設定日誌
 logging.basicConfig(level=logging.INFO)
@@ -341,6 +344,19 @@ ECPAY_INVOICE_ENABLED = os.getenv("ECPAY_INVOICE_ENABLED", "false").lower() == "
 ECPAY_INVOICE_MERCHANT_ID = os.getenv("ECPAY_INVOICE_MERCHANT_ID")  # 發票商店代號（可能與付款不同）
 ECPAY_INVOICE_API = os.getenv("ECPAY_INVOICE_API", "https://einvoice-stage.ecpay.com.tw/Invoice/Issue")  # 測試環境
 # ECPAY_INVOICE_API=https://einvoice.ecpay.com.tw/Invoice/Issue  # 生產環境
+
+# 郵件發送配置（SMTP）
+SMTP_ENABLED = os.getenv("SMTP_ENABLED", "true").lower() == "true"
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER")  # 發送郵件的帳號
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")  # 應用程式密碼（Gmail 需要使用應用程式密碼）或 SMTP 密碼
+CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "aiagent168168@gmail.com")  # 接收聯繫表單的郵件地址
+
+# 支援其他郵件服務（如果 Gmail 無法使用）
+# 例如：Outlook/Hotmail: smtp-mail.outlook.com:587
+# 例如：Yahoo: smtp.mail.yahoo.com:587
+# 例如：SendGrid: smtp.sendgrid.net:587 (需要 API Key)
 
 # 安全認證
 security = HTTPBearer()
@@ -1057,6 +1073,73 @@ def validate_email(email: str) -> bool:
     # 基本 Email 格式驗證
     email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return bool(re.match(email_pattern, email))
+
+
+# ===== 郵件發送功能 =====
+
+def send_email(
+    to_email: str,
+    subject: str,
+    body: str,
+    html_body: Optional[str] = None
+) -> bool:
+    """發送郵件
+    
+    Args:
+        to_email: 收件人郵件地址
+        subject: 郵件主旨
+        body: 郵件純文字內容
+        html_body: 郵件 HTML 內容（可選）
+    
+    Returns:
+        是否發送成功
+    """
+    if not SMTP_ENABLED:
+        logger.warning("SMTP 功能未啟用，無法發送郵件")
+        return False
+    
+    if not SMTP_USER or not SMTP_PASSWORD:
+        logger.error("SMTP 帳號或密碼未設定，無法發送郵件")
+        return False
+    
+    if not validate_email(to_email):
+        logger.error(f"無效的收件人郵件地址: {to_email}")
+        return False
+    
+    try:
+        # 創建郵件
+        msg = MIMEMultipart('alternative')
+        msg['From'] = SMTP_USER
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        
+        # 添加純文字內容
+        text_part = MIMEText(body, 'plain', 'utf-8')
+        msg.attach(text_part)
+        
+        # 如果有 HTML 內容，也添加
+        if html_body:
+            html_part = MIMEText(html_body, 'html', 'utf-8')
+            msg.attach(html_part)
+        
+        # 發送郵件
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()  # 啟用 TLS
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+        
+        logger.info(f"郵件已成功發送到: {to_email}")
+        return True
+        
+    except smtplib.SMTPAuthenticationError as e:
+        logger.error(f"SMTP 認證失敗: {e}")
+        return False
+    except smtplib.SMTPException as e:
+        logger.error(f"SMTP 錯誤: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"發送郵件時發生錯誤: {e}", exc_info=True)
+        return False
 
 
 # ===== ECPay 發票開立功能 =====
@@ -8587,6 +8670,154 @@ def create_app() -> FastAPI:
                 return {"user_id": user_id, "tier": "none", "expires_at": None}
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
+
+    @app.post("/api/contact/send")
+    @rate_limit("5/minute")
+    async def send_contact_email(request: Request):
+        """處理聯繫表單並發送郵件"""
+        try:
+            body = await request.json()
+            
+            # 獲取表單資料
+            name = body.get("name", "").strip()
+            email = body.get("email", "").strip()
+            phone = body.get("phone", "").strip()
+            company = body.get("company", "").strip()
+            inquiry_type = body.get("inquiryType", "").strip()
+            budget = body.get("budget", "").strip()
+            team_size = body.get("teamSize", "").strip()
+            timeline = body.get("timeline", "").strip()
+            message = body.get("message", "").strip()
+            
+            # 驗證必填欄位
+            if not name or not email or not inquiry_type:
+                return JSONResponse(
+                    {"error": "請填寫必填欄位（姓名、電子信箱、需求類型）"},
+                    status_code=400
+                )
+            
+            # 驗證 Email 格式
+            if not validate_email(email):
+                return JSONResponse(
+                    {"error": "請輸入有效的電子信箱"},
+                    status_code=400
+                )
+            
+            # 需求類型對應文字
+            inquiry_type_map = {
+                'custom': '客製化方案',
+                'enterprise': '企業合作',
+                'technical': '技術支援',
+                'pricing': '方案與報價諮詢',
+                'other': '其他'
+            }
+            
+            # 預算範圍對應文字
+            budget_map = {
+                'under-50k': 'NT$ 50,000 以下',
+                '50k-100k': 'NT$ 50,000 - 100,000',
+                '100k-200k': 'NT$ 100,000 - 200,000',
+                '200k-500k': 'NT$ 200,000 - 500,000',
+                'over-500k': 'NT$ 500,000 以上',
+                'discuss': '需討論'
+            }
+            
+            # 團隊規模對應文字
+            team_size_map = {
+                'individual': '個人',
+                'small': '2-5 人',
+                'medium': '6-20 人',
+                'large': '21-50 人',
+                'enterprise': '50 人以上'
+            }
+            
+            # 預計使用時間對應文字
+            timeline_map = {
+                'immediate': '立即需要',
+                '1month': '1 個月內',
+                '3months': '3 個月內',
+                '6months': '6 個月內',
+                'planning': '還在規劃中'
+            }
+            
+            # 構建郵件內容
+            subject = f"ReelMind 聯繫表單 - {inquiry_type_map.get(inquiry_type, '其他')} - {company or name}"
+            
+            email_body = f"""【基本資訊】
+姓名：{name}
+電子信箱：{email}
+電話：{phone or '未填寫'}
+公司名稱：{company or '未填寫'}
+
+【需求資訊】
+需求類型：{inquiry_type_map.get(inquiry_type, '未填寫')}
+預算範圍：{budget_map.get(budget, '未填寫') if budget else '未填寫'}
+團隊規模：{team_size_map.get(team_size, '未填寫') if team_size else '未填寫'}
+預計使用時間：{timeline_map.get(timeline, '未填寫') if timeline else '未填寫'}
+
+【詳細需求】
+{message or '未填寫'}
+
+---
+此郵件由 ReelMind 聯繫表單自動發送
+發送時間：{get_taiwan_time().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+            
+            # HTML 格式的郵件內容
+            html_body = f"""
+            <html>
+            <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                <h2 style="color: #2563EB;">ReelMind 聯繫表單</h2>
+                
+                <h3 style="color: #1E293B; border-bottom: 2px solid #E2E8F0; padding-bottom: 8px;">基本資訊</h3>
+                <p><strong>姓名：</strong>{name}</p>
+                <p><strong>電子信箱：</strong><a href="mailto:{email}">{email}</a></p>
+                <p><strong>電話：</strong>{phone or '未填寫'}</p>
+                <p><strong>公司名稱：</strong>{company or '未填寫'}</p>
+                
+                <h3 style="color: #1E293B; border-bottom: 2px solid #E2E8F0; padding-bottom: 8px; margin-top: 24px;">需求資訊</h3>
+                <p><strong>需求類型：</strong>{inquiry_type_map.get(inquiry_type, '未填寫')}</p>
+                <p><strong>預算範圍：</strong>{budget_map.get(budget, '未填寫') if budget else '未填寫'}</p>
+                <p><strong>團隊規模：</strong>{team_size_map.get(team_size, '未填寫') if team_size else '未填寫'}</p>
+                <p><strong>預計使用時間：</strong>{timeline_map.get(timeline, '未填寫') if timeline else '未填寫'}</p>
+                
+                <h3 style="color: #1E293B; border-bottom: 2px solid #E2E8F0; padding-bottom: 8px; margin-top: 24px;">詳細需求</h3>
+                <p style="white-space: pre-wrap; background: #F8FAFC; padding: 16px; border-radius: 8px; border-left: 4px solid #2563EB;">{message or '未填寫'}</p>
+                
+                <hr style="border: none; border-top: 1px solid #E2E8F0; margin: 24px 0;">
+                <p style="color: #64748B; font-size: 12px;">
+                    此郵件由 ReelMind 聯繫表單自動發送<br>
+                    發送時間：{get_taiwan_time().strftime('%Y-%m-%d %H:%M:%S')}
+                </p>
+            </body>
+            </html>
+            """
+            
+            # 發送郵件
+            success = send_email(
+                to_email=CONTACT_EMAIL,
+                subject=subject,
+                body=email_body,
+                html_body=html_body
+            )
+            
+            if success:
+                return JSONResponse({
+                    "success": True,
+                    "message": "您的訊息已成功發送，我們會在 24 小時內回覆您"
+                })
+            else:
+                return JSONResponse(
+                    {"error": "郵件發送失敗，請稍後再試或直接來信至 aiagent168168@gmail.com"},
+                    status_code=500
+                )
+                
+        except Exception as e:
+            logger.error(f"處理聯繫表單時發生錯誤: {e}", exc_info=True)
+            return JSONResponse(
+                {"error": "伺服器錯誤，請稍後再試"},
+                status_code=500
+            )
 
     @app.post("/api/admin/auth/login")
     @rate_limit("5/minute")
