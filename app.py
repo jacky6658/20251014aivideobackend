@@ -714,6 +714,44 @@ def init_database():
         )
     """)
     
+    # 創建安全審計日誌表
+    execute_sql("""
+        CREATE TABLE IF NOT EXISTS security_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            details TEXT,
+            ip_address TEXT,
+            user_agent TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # 為 security_logs 表創建索引（提升查詢性能）
+    try:
+        if use_postgresql:
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_security_logs_user_id ON security_logs(user_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_security_logs_event_type ON security_logs(event_type)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_security_logs_created_at ON security_logs(created_at)
+            """)
+        else:
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_security_logs_user_id ON security_logs(user_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_security_logs_event_type ON security_logs(event_type)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_security_logs_created_at ON security_logs(created_at)
+            """)
+    except Exception as e:
+        print(f"INFO: 創建 security_logs 索引時出現錯誤（可能已存在）: {e}")
+    
     # 初始化管理員帳號（如果不存在）
     try:
         admin_email = "aiagentg888@gmail.com"
@@ -888,6 +926,57 @@ def get_db_connection():
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     return conn
+
+
+def log_security_event(user_id: str, event_type: str, details: dict, request: Optional[Request] = None):
+    """記錄安全事件到審計日誌
+    
+    Args:
+        user_id: 執行操作的用戶 ID
+        event_type: 事件類型（如：byok_key_saved, order_created, subscription_changed 等）
+        details: 事件詳情（字典格式，會轉換為 JSON）
+        request: FastAPI Request 對象（用於獲取 IP 和 User-Agent）
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # 獲取 IP 地址和 User-Agent
+        ip_address = "unknown"
+        user_agent = "unknown"
+        if request:
+            if hasattr(request, 'client') and request.client:
+                ip_address = request.client.host or "unknown"
+            user_agent = request.headers.get("user-agent", "unknown") if hasattr(request, 'headers') else "unknown"
+        
+        # 將 details 轉換為 JSON 字符串
+        details_json = json.dumps(details, ensure_ascii=False) if details else "{}"
+        
+        database_url = os.getenv("DATABASE_URL")
+        use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+        
+        if use_postgresql:
+            cursor.execute("""
+                INSERT INTO security_logs (user_id, event_type, details, ip_address, user_agent, created_at)
+                VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            """, (user_id, event_type, details_json, ip_address, user_agent))
+        else:
+            cursor.execute("""
+                INSERT INTO security_logs (user_id, event_type, details, ip_address, user_agent, created_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (user_id, event_type, details_json, ip_address, user_agent))
+        
+        if not use_postgresql:
+            conn.commit()
+        cursor.close()
+        conn.close()
+        
+        # 同時記錄到應用日誌
+        logger.info(f"安全事件記錄: user_id={user_id}, event_type={event_type}, ip={ip_address}")
+        
+    except Exception as e:
+        # 審計日誌記錄失敗不應該影響主流程，只記錄錯誤
+        logger.error(f"記錄安全事件失敗: {e}", exc_info=True)
 
 
 def generate_dedup_hash(content: str, platform: str = None, topic: str = None) -> str:
@@ -2312,6 +2401,77 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     
+    # CSRF Token 存儲（簡化版：使用內存存儲，生產環境建議使用 Redis）
+    csrf_tokens: Dict[str, str] = {}  # {user_id: csrf_token}
+    
+    # CSRF Token 生成端點
+    @app.get("/api/csrf-token")
+    async def get_csrf_token(current_user_id: Optional[str] = Depends(get_current_user)):
+        """生成 CSRF Token（需要登入）"""
+        if not current_user_id:
+            return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        # 生成新的 CSRF Token
+        csrf_token = secrets.token_urlsafe(32)
+        
+        # 存儲 Token（簡化版：使用內存，生產環境建議使用 Redis 或 Session）
+        csrf_tokens[current_user_id] = csrf_token
+        
+        return {"csrf_token": csrf_token}
+    
+    # CSRF Token 驗證中間件
+    @app.middleware("http")
+    async def verify_csrf_token(request: Request, call_next):
+        """驗證 CSRF Token（僅對 POST/PUT/DELETE 請求）"""
+        # 排除不需要 CSRF 保護的端點
+        excluded_paths = [
+            "/api/csrf-token",
+            "/api/health",
+            "/api/auth/google/callback",
+            "/api/auth/google/callback-post",
+            "/api/payment/webhook",  # ECPay Webhook（使用簽章驗證）
+            "/api/webhook/verify-license",  # n8n Webhook（使用 secret 驗證）
+        ]
+        
+        # 檢查是否為需要 CSRF 保護的請求
+        if request.method in ["POST", "PUT", "DELETE", "PATCH"]:
+            # 排除不需要 CSRF 保護的端點
+            if any(request.url.path.startswith(path) for path in excluded_paths):
+                return await call_next(request)
+            
+            # 獲取 CSRF Token（從 Header 或 Query 參數）
+            csrf_token = request.headers.get("X-CSRF-Token") or request.query_params.get("csrf_token")
+            
+            if not csrf_token:
+                logger.warning(f"CSRF Token 缺失: {request.method} {request.url.path}, IP: {request.client.host if request.client else 'unknown'}")
+                return JSONResponse({"error": "CSRF Token 缺失"}, status_code=403)
+            
+            # 獲取用戶 ID（從 JWT Token）
+            try:
+                # 嘗試從 Authorization header 獲取用戶 ID
+                auth_header = request.headers.get("Authorization", "")
+                if auth_header.startswith("Bearer "):
+                    token = auth_header.replace("Bearer ", "")
+                    user_id = verify_access_token(token)
+                    
+                    if user_id:
+                        # 驗證 CSRF Token
+                        stored_token = csrf_tokens.get(user_id)
+                        if not stored_token or stored_token != csrf_token:
+                            logger.warning(f"CSRF Token 驗證失敗: user_id={user_id}, IP: {request.client.host if request.client else 'unknown'}")
+                            return JSONResponse({"error": "CSRF Token 驗證失敗"}, status_code=403)
+                    else:
+                        # 有 JWT Token 但驗證失敗，要求 CSRF Token（可能是過期 Token）
+                        logger.debug(f"CSRF 驗證：JWT Token 無效，但已提供 CSRF Token")
+                else:
+                    # 沒有 JWT Token，可能是公開端點，允許通過
+                    logger.debug(f"CSRF 驗證：無 JWT Token，允許通過（可能是公開端點）")
+            except Exception as e:
+                # 如果無法獲取用戶 ID，允許通過（可能是公開端點）
+                logger.debug(f"CSRF 驗證時無法獲取用戶 ID: {e}")
+        
+        return await call_next(request)
+    
     # 安全標頭中間件
     @app.middleware("http")
     async def add_security_headers(request: Request, call_next):
@@ -2792,7 +2952,7 @@ def create_app() -> FastAPI:
     
     @app.get("/api/user/conversations/{user_id}")
     @rate_limit("30/minute")  # 添加 Rate Limiting
-    async def get_user_conversations(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
+    async def get_user_conversations(user_id: str, request: Request, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶的對話記錄"""
         # 驗證用戶 ID
         if not validate_user_id(user_id):
@@ -4477,6 +4637,20 @@ def create_app() -> FastAPI:
             if not use_postgresql:
                 conn.commit()
             conn.close()
+            
+            # 記錄安全事件（審計日誌）
+            log_security_event(
+                user_id=admin_user,  # 記錄執行操作的管理員
+                event_type="subscription_changed",
+                details={
+                    "target_user_id": user_id,
+                    "is_subscribed": bool(is_subscribed),
+                    "subscription_days": subscription_days,
+                    "expires_at": str(expires_dt) if expires_dt else None,
+                    "admin_note": admin_note
+                },
+                request=request
+            )
             
             return {
                 "success": True,
@@ -6913,6 +7087,14 @@ def create_app() -> FastAPI:
                 cursor.close()
                 conn.close()
             
+            # 記錄安全事件（審計日誌）
+            log_security_event(
+                user_id=current_user_id,
+                event_type="order_created",
+                details={"order_id": trade_no, "plan": plan, "amount": amount, "payment_method": "ecpay"},
+                request=request
+            )
+            
             # 準備 ECPay 參數
             trade_date = get_taiwan_time().strftime("%Y/%m/%d %H:%M:%S")
             item_name = f"ReelMind {'月費' if plan == 'monthly' else '年費'}方案"
@@ -8075,6 +8257,14 @@ def create_app() -> FastAPI:
             
             # 記錄操作（安全審計）
             logger.info(f"Payment callback 處理: user_id={user_id}, plan={plan}, IP={request.client.host if request.client else 'unknown'}")
+            
+            # 記錄安全事件（審計日誌）
+            log_security_event(
+                user_id=user_id,
+                event_type="payment_callback_processed",
+                details={"plan": plan, "transaction_id": transaction_id, "amount": amount},
+                request=request
+            )
 
             # 計算到期日
             days = 30 if plan == "monthly" else 365
@@ -8747,7 +8937,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/user/orders/{user_id}")
     @rate_limit("30/minute")  # 添加 Rate Limiting
-    async def get_user_orders(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
+    async def get_user_orders(user_id: str, request: Request, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶的購買記錄"""
         # 驗證用戶 ID
         if not validate_user_id(user_id):
@@ -8943,7 +9133,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/user/orders/{order_id}")
     @rate_limit("30/minute")  # 添加 Rate Limiting
-    async def get_order_detail(order_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
+    async def get_order_detail(order_id: str, request: Request, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取單筆訂單詳情"""
         if not current_user_id:
             logger.warning("未授權訪問訂單詳情")
@@ -9569,6 +9759,14 @@ def create_app() -> FastAPI:
             conn.commit()
             cursor.close()
             conn.close()
+            
+            # 記錄安全事件（審計日誌）
+            log_security_event(
+                user_id=user_id,
+                event_type="byok_key_saved",
+                details={"provider": provider, "last4": last4},
+                request=request
+            )
             
             return {"message": "API Key 已安全保存", "provider": provider, "last4": last4}
         
