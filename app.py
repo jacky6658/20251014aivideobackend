@@ -242,6 +242,7 @@ class ChatBody(BaseModel):
     profile: Optional[str] = None
     history: Optional[List[ChatMessage]] = None
     topic: Optional[str] = None
+    conversation_type: Optional[str] = None  # 新增：對話類型 (ai_advisor, ip_planning)
     style: Optional[str] = None
     duration: Optional[str] = "30"
     user_id: Optional[str] = None  # 新增用戶ID
@@ -2066,7 +2067,7 @@ def classify_conversation(user_message: str, ai_response: str) -> str:
     else:
         return "general_consultation"
 
-def get_user_memory(user_id: Optional[str]) -> str:
+def get_user_memory(user_id: Optional[str], conversation_type: Optional[str] = None) -> str:
     """獲取用戶的增強長期記憶和個人化資訊"""
     if not user_id:
         return ""
@@ -2158,22 +2159,42 @@ def get_user_memory(user_id: Optional[str]) -> str:
         behaviors = cursor.fetchall()
 
         # 獲取長期記憶（long_term_memory 表）- 新增
-        if use_postgresql:
-            cursor.execute("""
-                SELECT conversation_type, session_id, message_role, message_content, created_at
-                FROM long_term_memory
-                WHERE user_id = %s
-                ORDER BY created_at DESC
-                LIMIT 50
-            """, (user_id,))
+        # 如果指定了 conversation_type，只獲取該類型的記憶
+        if conversation_type:
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT conversation_type, session_id, message_role, message_content, created_at
+                    FROM long_term_memory
+                    WHERE user_id = %s AND conversation_type = %s
+                    ORDER BY created_at DESC
+                    LIMIT 50
+                """, (user_id, conversation_type))
+            else:
+                cursor.execute("""
+                    SELECT conversation_type, session_id, message_role, message_content, created_at
+                    FROM long_term_memory
+                    WHERE user_id = ? AND conversation_type = ?
+                    ORDER BY created_at DESC
+                    LIMIT 50
+                """, (user_id, conversation_type))
         else:
-            cursor.execute("""
-                SELECT conversation_type, session_id, message_role, message_content, created_at
-                FROM long_term_memory
-                WHERE user_id = ?
-                ORDER BY created_at DESC
-                LIMIT 50
-            """, (user_id,))
+            # 如果沒有指定類型，獲取所有類型的記憶
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT conversation_type, session_id, message_role, message_content, created_at
+                    FROM long_term_memory
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT 50
+                """, (user_id,))
+            else:
+                cursor.execute("""
+                    SELECT conversation_type, session_id, message_role, message_content, created_at
+                    FROM long_term_memory
+                    WHERE user_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT 50
+                """, (user_id,))
         long_term_memories = cursor.fetchall()
 
         conn.close()
@@ -2893,8 +2914,9 @@ def create_app() -> FastAPI:
             stm_context = stm.get_context_for_prompt(user_id)
             stm_history = stm.get_recent_turns_for_history(user_id, limit=5)
         
-        # 2. 載入長期記憶（LTM）- 您現有的系統
-        ltm_memory = get_user_memory(user_id) if user_id else ""
+        # 2. 載入長期記憶（LTM）- 根據對話類型過濾
+        conversation_type = body.conversation_type or None
+        ltm_memory = get_user_memory(user_id, conversation_type) if user_id else ""
         
         # 3. 組合增強版 prompt
         system_text = build_enhanced_prompt(
