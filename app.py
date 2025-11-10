@@ -245,6 +245,7 @@ class ChatBody(BaseModel):
     style: Optional[str] = None
     duration: Optional[str] = "30"
     user_id: Optional[str] = None  # 新增用戶ID
+    script_structure: Optional[str] = None  # 腳本結構（A/B/C/D/E）
 
 
 class UserProfile(BaseModel):
@@ -2298,8 +2299,15 @@ def build_system_prompt(kb_text: str, platform: Optional[str], profile: Optional
         "   - 基於已確定的定位，推薦3-5個具體選題方向\n"
         "   - 不要再問定位相關問題\n"
         "\n"
-        "3. 腳本生成階段：\n"
-        "   - 只有在用戶明確要求時，才提供完整腳本\n"
+        "3. 腳本結構選擇階段（重要！）：\n"
+        "   - 在選題完成後、生成腳本前，必須主動詢問用戶想要使用哪種腳本結構\n"
+        "   - 提供五種結構選項：A（標準行銷三段式）、B（問題→解決→證明）、C（Before→After→秘密揭露）、D（教學知識型）、E（故事敘事型）\n"
+        "   - 如果用戶問「有什麼差異」或「哪個適合我」，要清楚解釋每種結構的特點和使用場景，並根據用戶的帳號定位、目標受眾、內容目標給出建議\n"
+        "   - 只有當用戶明確選擇結構後，才進入腳本生成\n"
+        "\n"
+        "4. 腳本生成階段：\n"
+        "   - 根據用戶選擇的結構（A/B/C/D/E）生成對應格式的完整腳本\n"
+        "   - 如果用戶沒有選擇結構，必須先詢問，不要直接使用 A 結構\n"
         "\n"
         "對話記憶檢查清單：\n"
         "✅ 用戶是否已經說明受眾？→ 如果有，不要再問！\n"
@@ -2314,12 +2322,23 @@ def build_system_prompt(kb_text: str, platform: Optional[str], profile: Optional
         "• 每段用換行分隔，保持清晰易讀\n"
         "• 所有內容都必須是純文字格式，沒有任何程式碼符號\n"
         "\n"
-        "腳本結構：盡量對齊 Hook → Value → CTA 結構；Value 不超過三點，CTA 給一個明確動作。\n"
-        "完整腳本應包含：\n"
-        "1. 主題標題\n"
-        "2. 腳本內容（只包含台詞、秒數、CTA，不包含畫面描述）\n"
-        "3. 畫面感（鏡頭、音效建議）\n"
-        "4. 發佈文案\n"
+        "腳本結構選擇指引：\n"
+        "知識庫中提供五種腳本結構（A/B/C/D/E），每種結構適用不同場景：\n"
+        "- A. 標準行銷三段式（Hook → Value → CTA）：通用/帶貨，適合產品推廣、快速轉換\n"
+        "- B. 問題 → 解決 → 證明：教育/建立信任，適合教學內容、建立專業形象\n"
+        "- C. Before → After → 秘密揭露：視覺反差/爆量，適合效果展示、吸引眼球\n"
+        "- D. 教學知識型（迷思 → 原理 → 要點 → 行動）：冷受眾，適合知識科普、教育內容\n"
+        "- E. 故事敘事型（起 → 承 → 轉 → 合）：人設/口碑，適合個人品牌、情感連結\n"
+        "\n"
+        "腳本生成要求：\n"
+        "1. 必須根據用戶選擇的結構（A/B/C/D/E）生成，不要預設使用 A 結構\n"
+        "2. 如果用戶未選擇結構，必須先詢問並解釋差異，給出建議\n"
+        "3. 完整腳本應包含：\n"
+        "   - 主題標題\n"
+        "   - 根據選擇的結構生成對應格式的腳本內容（只包含台詞、秒數、CTA，不包含畫面描述）\n"
+        "   - 畫面感（鏡頭、音效建議）\n"
+        "   - 發佈文案\n"
+        "4. Value 段不超過三點，CTA 給一個明確動作\n"
     )
     style_line = style or "格式要求：分段清楚，短句，每段換行，適度加入表情符號（如：✅✨🔥📌），避免口頭禪。使用數字標示（1. 2. 3.）或列點（•）來組織內容，不要使用 * 或 ** 等 Markdown 格式。"
     return f"{platform_line}\n{profile_line}\n{topic_line}\n{duration_line}\n{style_line}\n\n{rules}\n{memory_header}{user_memory}\n{kb_header}{kb_text}"
@@ -2742,6 +2761,30 @@ def create_app() -> FastAPI:
         if not api_key:
             return JSONResponse({"error": "Missing GEMINI_API_KEY in .env"}, status_code=500)
 
+        # 根據選擇的結構生成對應的提示詞
+        script_structure = getattr(body, 'script_structure', None) or 'A'  # 預設為 A
+        
+        structure_instructions = {
+            'A': """請使用「標準行銷三段式（Hook → Value → CTA）」結構生成完整腳本：
+- Hook 0–5s：吸睛鉤子（痛點/反差/數據/疑問）
+- Value 5–25s：最多三個重點（機制/步驟/見證/對比）
+- CTA 25–30s：明確下一步（點連結、留言、關注/收藏）""",
+            'B': """請使用「問題 → 解決 → 證明（Problem → Solution → Proof）」結構生成完整腳本：
+- 用場景/台詞丟痛點 → 給解法 → 拿實證/案例/對比收尾
+- 適合教育/建立信任的內容""",
+            'C': """請使用「Before → After → 秘密揭露」結構生成完整腳本：
+- 先閃現結果（After）→ 回顧 Before → 揭露方法/產品/關鍵動作
+- 適合視覺反差/爆量的內容""",
+            'D': """請使用「教學知識型（迷思 → 原理 → 要點 → 行動）」結構生成完整腳本：
+- 用「你知道為什麼…？」切入；重點條列，搭字幕與圖示
+- 適合冷受眾、知識科普內容""",
+            'E': """請使用「故事敘事型（起 → 承 → 轉 → 合）」結構生成完整腳本：
+- 個人經歷/阻礙/轉折/感悟，最後落到價值與行動
+- 適合人設/口碑、個人品牌內容"""
+        }
+        
+        structure_instruction = structure_instructions.get(script_structure, structure_instructions['A'])
+        
         # 專門的腳本生成提示詞
         script_prompt = f"""
 你是AIJob短影音顧問，專門協助用戶生成短影音腳本。
@@ -2751,14 +2794,15 @@ def create_app() -> FastAPI:
 - 主題：{body.topic or '未設定'}
 - 帳號定位：{body.profile or '未設定'}
 - 時長：{body.duration or '30'}秒
+- 腳本結構：{script_structure}
 
-請生成包含以下結構的完整腳本：
+{structure_instruction}
+
+完整腳本應包含：
 1. 主題標題
-2. Hook（開場鉤子）
-3. Value（核心價值內容）
-4. CTA（行動呼籲）
-5. 畫面感描述
-6. 發佈文案
+2. 根據選擇的結構生成對應格式的腳本內容
+3. 畫面感描述（鏡頭、音效建議）
+4. 發佈文案
 
 格式要求：分段清楚，短句，每段換行，適度加入表情符號，避免口頭禪。絕對不要使用 ** 或任何 Markdown 格式符號。
 """
