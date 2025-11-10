@@ -8841,6 +8841,46 @@ def create_app() -> FastAPI:
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.delete("/api/generations/{gen_id}")
+    async def delete_generation(gen_id: int, current_user_id: Optional[str] = Depends(get_current_user)):
+        """刪除選題記錄"""
+        if not current_user_id:
+            return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 檢查選題記錄是否屬於當前用戶
+            if use_postgresql:
+                cursor.execute("SELECT user_id FROM generations WHERE id = %s", (gen_id,))
+            else:
+                cursor.execute("SELECT user_id FROM generations WHERE id = ?", (gen_id,))
+            result = cursor.fetchone()
+            
+            if not result:
+                return JSONResponse({"error": "選題記錄不存在"}, status_code=404)
+            
+            if result[0] != current_user_id:
+                return JSONResponse({"error": "無權限刪除此選題記錄"}, status_code=403)
+            
+            # 刪除選題記錄
+            if use_postgresql:
+                cursor.execute("DELETE FROM generations WHERE id = %s", (gen_id,))
+            else:
+                cursor.execute("DELETE FROM generations WHERE id = ?", (gen_id,))
+            
+            if not use_postgresql:
+                conn.commit()
+            conn.close()
+            
+            return {"success": True, "message": "選題記錄刪除成功"}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     @app.post("/api/conversation/summary")
     async def create_conversation_summary(user_id: str, messages: List[ChatMessage], current_user_id: Optional[str] = Depends(get_current_user)):
         """創建對話摘要"""
