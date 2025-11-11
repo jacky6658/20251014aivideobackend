@@ -2359,7 +2359,13 @@ def build_system_prompt(kb_text: str, platform: Optional[str], profile: Optional
         "   - 根據選擇的結構生成對應格式的腳本內容（只包含台詞、秒數、CTA，不包含畫面描述）\n"
         "   - 畫面感（鏡頭、音效建議）\n"
         "   - 發佈文案\n"
-        "4. Value 段不超過三點，CTA 給一個明確動作\n"
+        "4. ⚠️ 重要：必須使用對應結構的專屬命名，不要混用：\n"
+        "   - A 結構：使用「Hook、Value、CTA」\n"
+        "   - B 結構：使用「問題、解決、證明」（絕對不要用 Hook、Value、CTA）\n"
+        "   - C 結構：使用「After、Before、秘密揭露」（絕對不要用 Hook、Value、CTA）\n"
+        "   - D 結構：使用「迷思、原理、要點、行動」（絕對不要用 Hook、Value、CTA）\n"
+        "   - E 結構：使用「起、承、轉、合」（絕對不要用 Hook、Value、CTA）\n"
+        "5. 核心內容段不超過三點，行動呼籲給一個明確動作\n"
     )
     style_line = style or "格式要求：分段清楚，短句，每段換行，適度加入表情符號（如：✅✨🔥📌），避免口頭禪。使用數字標示（1. 2. 3.）或列點（•）來組織內容，不要使用 * 或 ** 等 Markdown 格式。"
     return f"{platform_line}\n{profile_line}\n{topic_line}\n{duration_line}\n{style_line}\n\n{rules}\n{memory_header}{user_memory}\n{kb_header}{kb_text}"
@@ -2792,19 +2798,78 @@ def create_app() -> FastAPI:
 - CTA 25–30s：明確下一步（點連結、留言、關注/收藏）""",
             'B': """請使用「問題 → 解決 → 證明（Problem → Solution → Proof）」結構生成完整腳本：
 - 用場景/台詞丟痛點 → 給解法 → 拿實證/案例/對比收尾
-- 適合教育/建立信任的內容""",
+- 適合教育/建立信任的內容
+- ⚠️ 重要：必須使用「問題、解決、證明」這個命名，絕對不要使用「Hook、Value、CTA」！
+- 腳本標題應標示為：1. 主題標題 2. 問題（開場鉤子:問題） 3. 解決（核心價值內容:解決） 4. 證明（行動呼籲:證明+行動）""",
             'C': """請使用「Before → After → 秘密揭露」結構生成完整腳本：
 - 先閃現結果（After）→ 回顧 Before → 揭露方法/產品/關鍵動作
-- 適合視覺反差/爆量的內容""",
+- 適合視覺反差/爆量的內容
+- ⚠️ 重要：必須使用「After、Before、秘密揭露」這個命名，絕對不要使用「Hook、Value、CTA」！
+- 腳本標題應標示為：1. 主題標題 2. After（開場鉤子:結果閃現） 3. Before（核心內容:回顧） 4. 秘密揭露（行動呼籲:揭露方法）""",
             'D': """請使用「教學知識型（迷思 → 原理 → 要點 → 行動）」結構生成完整腳本：
 - 用「你知道為什麼…？」切入；重點條列，搭字幕與圖示
-- 適合冷受眾、知識科普內容""",
+- 適合冷受眾、知識科普內容
+- ⚠️ 重要：必須使用「迷思、原理、要點、行動」這個命名，絕對不要使用「Hook、Value、CTA」！
+- 腳本標題應標示為：1. 主題標題 2. 迷思 3. 原理 4. 要點 5. 行動""",
             'E': """請使用「故事敘事型（起 → 承 → 轉 → 合）」結構生成完整腳本：
 - 個人經歷/阻礙/轉折/感悟，最後落到價值與行動
-- 適合人設/口碑、個人品牌內容"""
+- 適合人設/口碑、個人品牌內容
+- ⚠️ 重要：必須使用「起、承、轉、合」這個命名，絕對不要使用「Hook、Value、CTA」！
+- 腳本標題應標示為：1. 主題標題 2. 起 3. 承 4. 轉 5. 合"""
         }
         
         structure_instruction = structure_instructions.get(script_structure, structure_instructions['A'])
+        
+        # 根據時長和結構計算時間分配
+        duration = int(body.duration or 30)
+        
+        # 定義各結構的時間分配（根據時長動態調整）
+        time_allocations = {
+            'A': {
+                30: [{'start': 0, 'end': 5, 'section': 'Hook'}, {'start': 5, 'end': 25, 'section': 'Value'}, {'start': 25, 'end': 30, 'section': 'CTA'}],
+                45: [{'start': 0, 'end': 7, 'section': 'Hook'}, {'start': 7, 'end': 38, 'section': 'Value'}, {'start': 38, 'end': 45, 'section': 'CTA'}],
+                60: [{'start': 0, 'end': 10, 'section': 'Hook'}, {'start': 10, 'end': 52, 'section': 'Value'}, {'start': 52, 'end': 60, 'section': 'CTA'}]
+            },
+            'B': {
+                30: [{'start': 0, 'end': 8, 'section': '問題'}, {'start': 8, 'end': 22, 'section': '解決'}, {'start': 22, 'end': 30, 'section': '證明'}],
+                45: [{'start': 0, 'end': 12, 'section': '問題'}, {'start': 12, 'end': 35, 'section': '解決'}, {'start': 35, 'end': 45, 'section': '證明'}],
+                60: [{'start': 0, 'end': 15, 'section': '問題'}, {'start': 15, 'end': 48, 'section': '解決'}, {'start': 48, 'end': 60, 'section': '證明'}]
+            },
+            'C': {
+                30: [{'start': 0, 'end': 5, 'section': 'After'}, {'start': 5, 'end': 20, 'section': 'Before'}, {'start': 20, 'end': 30, 'section': '秘密揭露'}],
+                45: [{'start': 0, 'end': 7, 'section': 'After'}, {'start': 7, 'end': 32, 'section': 'Before'}, {'start': 32, 'end': 45, 'section': '秘密揭露'}],
+                60: [{'start': 0, 'end': 10, 'section': 'After'}, {'start': 10, 'end': 45, 'section': 'Before'}, {'start': 45, 'end': 60, 'section': '秘密揭露'}]
+            },
+            'D': {
+                30: [{'start': 0, 'end': 6, 'section': '迷思'}, {'start': 6, 'end': 15, 'section': '原理'}, {'start': 15, 'end': 24, 'section': '要點'}, {'start': 24, 'end': 30, 'section': '行動'}],
+                45: [{'start': 0, 'end': 9, 'section': '迷思'}, {'start': 9, 'end': 22, 'section': '原理'}, {'start': 22, 'end': 36, 'section': '要點'}, {'start': 36, 'end': 45, 'section': '行動'}],
+                60: [{'start': 0, 'end': 12, 'section': '迷思'}, {'start': 12, 'end': 30, 'section': '原理'}, {'start': 30, 'end': 48, 'section': '要點'}, {'start': 48, 'end': 60, 'section': '行動'}]
+            },
+            'E': {
+                30: [{'start': 0, 'end': 7, 'section': '起'}, {'start': 7, 'end': 15, 'section': '承'}, {'start': 15, 'end': 23, 'section': '轉'}, {'start': 23, 'end': 30, 'section': '合'}],
+                45: [{'start': 0, 'end': 10, 'section': '起'}, {'start': 10, 'end': 22, 'section': '承'}, {'start': 22, 'end': 35, 'section': '轉'}, {'start': 35, 'end': 45, 'section': '合'}],
+                60: [{'start': 0, 'end': 13, 'section': '起'}, {'start': 13, 'end': 30, 'section': '承'}, {'start': 30, 'end': 47, 'section': '轉'}, {'start': 47, 'end': 60, 'section': '合'}]
+            }
+        }
+        
+        # 獲取對應的時間分配（如果沒有精確匹配，使用最接近的）
+        allocations = time_allocations.get(script_structure, {}).get(duration)
+        if not allocations:
+            # 如果沒有精確匹配，使用 30 秒的分配並按比例調整
+            base_allocations = time_allocations.get(script_structure, {}).get(30, [])
+            if base_allocations:
+                ratio = duration / 30
+                allocations = [{'start': int(a['start'] * ratio), 'end': int(a['end'] * ratio), 'section': a['section']} for a in base_allocations]
+                # 確保最後一個結束時間等於總時長
+                if allocations:
+                    allocations[-1]['end'] = duration
+        
+        # 生成時間分配說明
+        time_allocation_text = ""
+        if allocations:
+            time_allocation_text = "\n時間分配（必須嚴格按照以下時間段生成）：\n"
+            for alloc in allocations:
+                time_allocation_text += f"- {alloc['section']}：{alloc['start']}-{alloc['end']}秒\n"
         
         # 專門的腳本生成提示詞
         script_prompt = f"""
@@ -2814,18 +2879,50 @@ def create_app() -> FastAPI:
 - 平台：{body.platform or '未設定'}
 - 主題：{body.topic or '未設定'}
 - 帳號定位：{body.profile or '未設定'}
-- 時長：{body.duration or '30'}秒
+- 時長：{duration}秒
 - 腳本結構：{script_structure}
 
 {structure_instruction}
+{time_allocation_text}
 
-完整腳本應包含：
-1. 主題標題
-2. 根據選擇的結構生成對應格式的腳本內容
-3. 畫面感描述（鏡頭、音效建議）
-4. 發佈文案
+⚠️ 極重要格式要求：
+1. 必須按照上述時間分配生成，每個時間段都要明確標示
+2. 每個時間段的格式必須包含：
+   - 時間標示：例如「0-5s (Hook)」或「0-8s (問題)」
+   - 台詞內容：該時間段要說的台詞
+   - 畫面描述：該時間段的鏡頭/畫面建議
+   - 字幕建議：該時間段的字幕文字
+   - 音效建議：該時間段的音效或轉場
 
-格式要求：分段清楚，短句，每段換行，適度加入表情符號，避免口頭禪。絕對不要使用 ** 或任何 Markdown 格式符號。
+3. 完整腳本應包含：
+   - 主題標題
+   - 根據選擇的結構和時間分配，逐段生成腳本內容（必須明確標示每個時間段的 start_sec 和 end_sec）
+   - 畫面感描述（鏡頭、音效建議）
+   - 發佈文案
+
+4. 格式範例（以 A 結構 30 秒為例）：
+   主題標題：XXX
+    
+   0-5s (Hook)：
+   台詞：XXX
+   畫面：XXX
+   字幕：XXX
+   音效：XXX
+   
+   5-25s (Value)：
+   台詞：XXX
+   畫面：XXX
+   字幕：XXX
+   音效：XXX
+   
+   25-30s (CTA)：
+   台詞：XXX
+   畫面：XXX
+   字幕：XXX
+   音效：XXX
+
+5. 絕對不要使用 ** 或任何 Markdown 格式符號
+6. 分段清楚，短句，每段換行，適度加入表情符號，避免口頭禪
 """
 
         try:
