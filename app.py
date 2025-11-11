@@ -890,6 +890,35 @@ def init_database():
         except Exception as e:
             print(f"INFO: licenses.user_id 唯一索引可能已存在: {e}")
     
+    # 為 licenses 表添加 auto_renew 欄位（如果不存在）
+    try:
+        if use_postgresql:
+            # PostgreSQL: 檢查欄位是否存在
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'licenses' AND column_name = 'auto_renew'
+            """)
+            if not cursor.fetchone():
+                try:
+                    cursor.execute("ALTER TABLE licenses ADD COLUMN auto_renew BOOLEAN DEFAULT TRUE")
+                    print("INFO: 已新增欄位 licenses.auto_renew")
+                except Exception as e:
+                    print(f"WARN: 新增欄位 licenses.auto_renew 失敗: {e}")
+        else:
+            # SQLite: 檢查欄位是否存在
+            cursor.execute("PRAGMA table_info(licenses)")
+            existing_columns = [col[1] for col in cursor.fetchall()]
+            
+            if 'auto_renew' not in existing_columns:
+                try:
+                    cursor.execute("ALTER TABLE licenses ADD COLUMN auto_renew INTEGER DEFAULT 1")
+                    print("INFO: 已新增欄位 licenses.auto_renew")
+                except Exception as e:
+                    print(f"WARN: 新增欄位 licenses.auto_renew 失敗: {e}")
+    except Exception as e:
+        print(f"WARN: 檢查 licenses.auto_renew 欄位時出錯: {e}")
+    
     # PostgreSQL 使用 AUTOCOMMIT，不需要 commit
     # SQLite 需要 commit
     if not use_postgresql:
@@ -9456,7 +9485,7 @@ def create_app() -> FastAPI:
             # 查詢授權資訊
             if use_postgresql:
                 cursor.execute("""
-                    SELECT tier, seats, source, start_at, expires_at, status
+                    SELECT tier, seats, source, start_at, expires_at, status, COALESCE(auto_renew, TRUE) as auto_renew
                     FROM licenses 
                     WHERE user_id = %s AND status = 'active'
                     ORDER BY created_at DESC
@@ -9464,7 +9493,7 @@ def create_app() -> FastAPI:
                 """, (current_user_id,))
             else:
                 cursor.execute("""
-                    SELECT tier, seats, source, start_at, expires_at, status
+                    SELECT tier, seats, source, start_at, expires_at, status, COALESCE(auto_renew, 1) as auto_renew
                     FROM licenses 
                     WHERE user_id = ? AND status = 'active'
                     ORDER BY created_at DESC
@@ -9479,7 +9508,8 @@ def create_app() -> FastAPI:
                 "is_subscribed": bool(is_subscribed),
                 "tier": None,
                 "expires_at": None,
-                "status": "inactive"
+                "status": "inactive",
+                "auto_renew": True  # 預設值
             }
             
             if license_row:
@@ -9489,13 +9519,307 @@ def create_app() -> FastAPI:
                     "source": license_row[2],
                     "start_at": str(license_row[3]) if license_row[3] else None,
                     "expires_at": str(license_row[4]) if license_row[4] else None,
-                    "status": license_row[5] or "active"
+                    "status": license_row[5] or "active",
+                    "auto_renew": bool(license_row[6]) if len(license_row) > 6 else True
                 })
             
             return result
         except Exception as e:
             logger.error(f"獲取訂閱狀態失敗: {e}", exc_info=True)
             return JSONResponse({"error": "服務器錯誤，請稍後再試"}, status_code=500)
+
+    @app.put("/api/user/subscription/auto-renew")
+    async def update_auto_renew_status(
+        request: Request,
+        current_user_id: Optional[str] = Depends(get_current_user)
+    ):
+        """更新用戶的自動續費狀態"""
+        if not current_user_id:
+            return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        try:
+            body = await request.json()
+            auto_renew = body.get("auto_renew", True)
+            
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 更新 licenses 表的 auto_renew 欄位
+            if use_postgresql:
+                cursor.execute("""
+                    UPDATE licenses 
+                    SET auto_renew = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = %s AND status = 'active'
+                """, (auto_renew, current_user_id))
+            else:
+                cursor.execute("""
+                    UPDATE licenses 
+                    SET auto_renew = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = ? AND status = 'active'
+                """, (1 if auto_renew else 0, current_user_id))
+            
+            if not use_postgresql:
+                conn.commit()
+            conn.close()
+            
+            return {
+                "status": "success",
+                "user_id": current_user_id,
+                "auto_renew": bool(auto_renew),
+                "message": "自動續費狀態已更新"
+            }
+        except Exception as e:
+            logger.error(f"更新自動續費狀態失敗: {e}", exc_info=True)
+            return JSONResponse({"error": "服務器錯誤，請稍後再試"}, status_code=500)
+
+    @app.post("/api/cron/check-renewals")
+    async def check_and_create_renewal_orders(
+        request: Request,
+        cron_secret: Optional[str] = None
+    ):
+        """
+        檢查即將到期的訂閱並自動建立續費訂單
+        
+        這個端點應該由定時任務（Cron Job）定期調用，例如每天執行一次。
+        可以通過 Zeabur Cron Job、n8n、或其他自動化工具調用。
+        
+        參數：
+        - cron_secret: 可選的安全密鑰，用於驗證調用來源（建議設定環境變數 CRON_SECRET）
+        """
+        # 驗證 Cron Secret（如果設定了）
+        expected_secret = os.getenv("CRON_SECRET")
+        if expected_secret:
+            # 可以從 Header 或 Query 參數獲取
+            provided_secret = cron_secret or request.headers.get("X-Cron-Secret") or request.query_params.get("secret")
+            if provided_secret != expected_secret:
+                logger.warning("Cron 任務調用被拒絕：密鑰不匹配")
+                return JSONResponse({"error": "未授權"}, status_code=401)
+        
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 計算到期時間範圍（3 天內到期）
+            now = get_taiwan_time()
+            days_ahead = 3  # 提前 3 天建立訂單
+            check_date = now + timedelta(days=days_ahead)
+            
+            # 查詢即將到期且啟用自動續費的訂閱
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT l.user_id, l.expires_at, l.tier, ua.email, ua.name
+                    FROM licenses l
+                    INNER JOIN user_auth ua ON l.user_id = ua.user_id
+                    WHERE l.status = 'active'
+                    AND l.auto_renew = TRUE
+                    AND l.expires_at <= %s
+                    AND l.expires_at > %s
+                    AND NOT EXISTS (
+                        SELECT 1 FROM orders o
+                        WHERE o.user_id = l.user_id
+                        AND o.payment_status = 'pending'
+                        AND o.created_at > %s
+                    )
+                """, (check_date, now, now - timedelta(days=1)))
+            else:
+                cursor.execute("""
+                    SELECT l.user_id, l.expires_at, l.tier, ua.email, ua.name
+                    FROM licenses l
+                    INNER JOIN user_auth ua ON l.user_id = ua.user_id
+                    WHERE l.status = 'active'
+                    AND l.auto_renew = 1
+                    AND datetime(l.expires_at) <= datetime(?)
+                    AND datetime(l.expires_at) > datetime(?)
+                    AND NOT EXISTS (
+                        SELECT 1 FROM orders o
+                        WHERE o.user_id = l.user_id
+                        AND o.payment_status = 'pending'
+                        AND datetime(o.created_at) > datetime(?)
+                    )
+                """, (check_date.isoformat(), now.isoformat(), (now - timedelta(days=1)).isoformat()))
+            
+            expiring_subscriptions = cursor.fetchall()
+            conn.close()
+            
+            results = {
+                "checked_at": now.isoformat(),
+                "check_date": check_date.isoformat(),
+                "days_ahead": days_ahead,
+                "found_count": len(expiring_subscriptions),
+                "processed": [],
+                "errors": []
+            }
+            
+            # 為每個即將到期的訂閱建立訂單
+            for row in expiring_subscriptions:
+                user_id = row[0]
+                expires_at_str = row[1]
+                tier = row[2] or "personal"
+                email = row[3] or ""
+                name = row[4] or "用戶"
+                
+                try:
+                    # 解析到期時間
+                    if isinstance(expires_at_str, str):
+                        expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
+                    else:
+                        expires_at = expires_at_str
+                    
+                    # 轉換為台灣時區
+                    if expires_at.tzinfo is None:
+                        expires_at = expires_at.replace(tzinfo=timezone.utc)
+                    taiwan_tz = timezone(timedelta(hours=8))
+                    expires_at = expires_at.astimezone(taiwan_tz)
+                    
+                    # 根據 tier 決定方案類型（如果沒有 tier，根據到期時間推算）
+                    # 預設為月費，如果訂閱期超過 200 天則為年費
+                    plan = "yearly" if tier == "yearly" else "monthly"
+                    
+                    # 建立訂單（使用現有的 create_payment_order 邏輯）
+                    # 這裡我們直接建立訂單記錄，不生成 ECPay 表單
+                    # 而是生成一個付款連結，通過 Email 發送給用戶
+                    
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    
+                    # 生成訂單號
+                    trade_no = f"RENEW{int(time.time() * 1000)}{secrets.token_hex(4).upper()}"
+                    
+                    # 計算金額
+                    amount = 2480 if plan == "monthly" else 23760
+                    
+                    # 計算新到期日
+                    if plan == "monthly":
+                        new_expires_at = expires_at + timedelta(days=30)
+                    else:
+                        new_expires_at = expires_at + timedelta(days=365)
+                    
+                    # 建立訂單記錄
+                    if use_postgresql:
+                        cursor.execute("""
+                            INSERT INTO orders (
+                                user_id, order_id, plan_type, amount, currency,
+                                payment_status, expires_at, created_at, updated_at
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        """, (user_id, trade_no, plan, amount, "TWD", "pending", new_expires_at))
+                    else:
+                        cursor.execute("""
+                            INSERT INTO orders (
+                                user_id, order_id, plan_type, amount, currency,
+                                payment_status, expires_at, created_at, updated_at
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        """, (user_id, trade_no, plan, amount, "TWD", "pending", new_expires_at.timestamp()))
+                    
+                    if not use_postgresql:
+                        conn.commit()
+                    conn.close()
+                    
+                    # 生成付款連結
+                    frontend_url = os.getenv("FRONTEND_URL", "https://reelmind.aijob.com.tw")
+                    payment_url = f"{frontend_url}/checkout.html?order_id={trade_no}&plan={plan}"
+                    
+                    # 發送 Email 通知
+                    email_sent = False
+                    if email and SMTP_ENABLED:
+                        email_subject = f"【ReelMind】訂閱即將到期，請完成續費"
+                        email_body = f"""
+親愛的 {name}，
+
+您的 ReelMind 訂閱將在 {expires_at.strftime('%Y年%m月%d日')} 到期。
+
+為了確保服務不中斷，我們已為您建立續費訂單。請點擊以下連結完成付款：
+
+{payment_url}
+
+訂單資訊：
+- 訂單號：{trade_no}
+- 方案：{'月費' if plan == 'monthly' else '年費'}方案
+- 金額：NT$ {amount:,}
+- 新到期日：{new_expires_at.strftime('%Y年%m月%d日')}
+
+付款完成後，您的訂閱將自動延長。
+
+如有任何問題，請隨時聯繫我們。
+
+感謝您的支持！
+ReelMind 團隊
+                        """
+                        
+                        html_body = f"""
+                        <html>
+                        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                            <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+                                <h2 style="color: #2563EB;">【ReelMind】訂閱即將到期，請完成續費</h2>
+                                <p>親愛的 {name}，</p>
+                                <p>您的 ReelMind 訂閱將在 <strong>{expires_at.strftime('%Y年%m月%d日')}</strong> 到期。</p>
+                                <p>為了確保服務不中斷，我們已為您建立續費訂單。請點擊以下按鈕完成付款：</p>
+                                <div style="text-align: center; margin: 30px 0;">
+                                    <a href="{payment_url}" style="display: inline-block; padding: 12px 24px; background: #2563EB; color: white; text-decoration: none; border-radius: 6px; font-weight: bold;">立即付款</a>
+                                </div>
+                                <div style="background: #F3F4F6; padding: 15px; border-radius: 8px; margin: 20px 0;">
+                                    <h3 style="margin-top: 0;">訂單資訊</h3>
+                                    <p><strong>訂單號：</strong>{trade_no}</p>
+                                    <p><strong>方案：</strong>{'月費' if plan == 'monthly' else '年費'}方案</p>
+                                    <p><strong>金額：</strong>NT$ {amount:,}</p>
+                                    <p><strong>新到期日：</strong>{new_expires_at.strftime('%Y年%m月%d日')}</p>
+                                </div>
+                                <p>付款完成後，您的訂閱將自動延長。</p>
+                                <p>如有任何問題，請隨時聯繫我們。</p>
+                                <p>感謝您的支持！<br>ReelMind 團隊</p>
+                            </div>
+                        </body>
+                        </html>
+                        """
+                        
+                        email_sent = send_email(
+                            to_email=email,
+                            subject=email_subject,
+                            body=email_body.strip(),
+                            html_body=html_body
+                        )
+                        
+                        if email_sent:
+                            logger.info(f"續費通知郵件已發送給用戶 {user_id} ({email})")
+                        else:
+                            logger.warning(f"續費通知郵件發送失敗：用戶 {user_id} ({email})")
+                    else:
+                        if not email:
+                            logger.warning(f"用戶 {user_id} 沒有 Email，無法發送通知")
+                        elif not SMTP_ENABLED:
+                            logger.warning(f"SMTP 未啟用，無法發送通知郵件")
+                    
+                    results["processed"].append({
+                        "user_id": user_id,
+                        "order_id": trade_no,
+                        "plan": plan,
+                        "amount": amount,
+                        "email_sent": email_sent,
+                        "payment_url": payment_url
+                    })
+                    
+                    logger.info(f"已為用戶 {user_id} 建立續費訂單 {trade_no}")
+                    
+                except Exception as e:
+                    error_msg = f"處理用戶 {user_id} 的續費訂單時發生錯誤: {str(e)}"
+                    logger.error(error_msg, exc_info=True)
+                    results["errors"].append({
+                        "user_id": user_id,
+                        "error": str(e)
+                    })
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"檢查續費訂單時發生錯誤: {e}", exc_info=True)
+            return JSONResponse({"error": f"服務器錯誤: {str(e)}"}, status_code=500)
 
     @app.get("/api/user/license/{user_id}")
     async def get_user_license(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
