@@ -7417,7 +7417,7 @@ def create_app() -> FastAPI:
             }
             
             # 記錄發送到 ECPay 的參數（隱藏敏感資訊）
-            logger.debug(f"ECPay 參數: MerchantID={ECPAY_MERCHANT_ID}, TradeNo={trade_no}, Amount={amount}, ChoosePayment=ALL")
+            logger.debug(f"ECPay 參數: MerchantID={ECPAY_MERCHANT_ID}, TradeNo={trade_no}, Amount={amount}, ChoosePayment={ecpay_data.get('ChoosePayment', 'Credit')}")
             
             # 生成簽章
             try:
