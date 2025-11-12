@@ -3037,10 +3037,19 @@ def create_app() -> FastAPI:
 
             # 獲取請求來源，用於 CORS headers
             origin = request.headers.get("Origin")
+            logger.info(f"生成腳本請求 - Origin: {origin}, Allowed origins: {cors_origins}")
             headers = {}
-            if origin and origin in cors_origins:
-                headers["Access-Control-Allow-Origin"] = origin
-                headers["Access-Control-Allow-Credentials"] = "true"
+            if origin:
+                if origin in cors_origins:
+                    headers["Access-Control-Allow-Origin"] = origin
+                    headers["Access-Control-Allow-Credentials"] = "true"
+                    headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+                    headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+                    logger.info(f"CORS headers set for origin: {origin}")
+                else:
+                    logger.warning(f"CORS: Origin {origin} not in allowed origins: {cors_origins}")
+            else:
+                logger.warning("CORS: No Origin header in request")
             
             return StreamingResponse(
                 generate(), 
