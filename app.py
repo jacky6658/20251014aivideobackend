@@ -1060,6 +1060,13 @@ def gen_check_mac_value(params: dict) -> str:
     if not ECPAY_HASH_KEY or not ECPAY_HASH_IV:
         raise ValueError("ECPAY_HASH_KEY 或 ECPAY_HASH_IV 未設定")
     
+    # 檢查 HashKey 和 HashIV 是否有空格或換行符（常見問題）
+    hash_key = ECPAY_HASH_KEY.strip() if ECPAY_HASH_KEY else ""
+    hash_iv = ECPAY_HASH_IV.strip() if ECPAY_HASH_IV else ""
+    
+    if not hash_key or not hash_iv:
+        raise ValueError("ECPAY_HASH_KEY 或 ECPAY_HASH_IV 為空")
+    
     # 移除 CheckMacValue（如果存在）
     items = [(k, str(v)) for k, v in params.items() if k != "CheckMacValue" and v is not None]
     # 按照參數名稱排序
@@ -1067,12 +1074,23 @@ def gen_check_mac_value(params: dict) -> str:
     # 組合成查詢字串
     query = "&".join([f"{k}={v}" for k, v in items])
     # 組合原始字串
-    raw = f"HashKey={ECPAY_HASH_KEY}&{query}&HashIV={ECPAY_HASH_IV}"
+    raw = f"HashKey={hash_key}&{query}&HashIV={hash_iv}"
+    
     # URL 編碼並轉小寫，將 %20 替換為 +
     import urllib.parse
+    # 根據 ECPay 官方文件，使用 quote 進行 URL 編碼，然後轉小寫，將 %20 替換為 +
+    # safe="()!*" 保留這些字元不編碼（根據 ECPay 官方文件）
     urlencoded = urllib.parse.quote(raw, safe="()!*").lower().replace("%20", "+")
+    
     # SHA256 雜湊並轉大寫
-    return hashlib.sha256(urlencoded.encode("utf-8")).hexdigest().upper()
+    signature = hashlib.sha256(urlencoded.encode("utf-8")).hexdigest().upper()
+    
+    # 記錄調試資訊（僅在開發環境）
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.debug(f"CheckMacValue 生成: 參數數量={len(items)}, HashKey長度={len(hash_key)}, HashIV長度={len(hash_iv)}")
+    
+    return signature
 
 
 def verify_ecpay_signature(params: dict) -> bool:
@@ -7431,7 +7449,19 @@ def create_app() -> FastAPI:
             item_name = f"ReelMind {'月費' if plan == 'monthly' else '年費'}方案"
             
             # 記錄 ECPay 設定狀態（用於調試）
-            logger.info(f"ECPay 設定檢查: MerchantID={ECPAY_MERCHANT_ID[:4] if ECPAY_MERCHANT_ID else 'None'}..., API={ECPAY_API}, 金額={amount}")
+            merchant_id_preview = ECPAY_MERCHANT_ID[:4] + "..." if ECPAY_MERCHANT_ID and len(ECPAY_MERCHANT_ID) > 4 else (ECPAY_MERCHANT_ID or "None")
+            hash_key_length = len(ECPAY_HASH_KEY.strip()) if ECPAY_HASH_KEY else 0
+            hash_iv_length = len(ECPAY_HASH_IV.strip()) if ECPAY_HASH_IV else 0
+            logger.info(f"ECPay 設定檢查: MerchantID={merchant_id_preview}, API={ECPAY_API}, HashKey長度={hash_key_length}, HashIV長度={hash_iv_length}, 金額={amount}")
+            
+            # 檢查環境變數是否設定正確
+            if not ECPAY_MERCHANT_ID or not ECPAY_HASH_KEY or not ECPAY_HASH_IV:
+                logger.error(f"ECPay 環境變數未設定完整: MerchantID={'已設定' if ECPAY_MERCHANT_ID else '未設定'}, HashKey={'已設定' if ECPAY_HASH_KEY else '未設定'}, HashIV={'已設定' if ECPAY_HASH_IV else '未設定'}")
+                return HTMLResponse("<html><body><h1>付款系統設定錯誤，請聯繫客服</h1></body></html>", status_code=500)
+            
+            # 檢查 HashKey 和 HashIV 是否有空格或換行符
+            if ECPAY_HASH_KEY != ECPAY_HASH_KEY.strip() or ECPAY_HASH_IV != ECPAY_HASH_IV.strip():
+                logger.warning(f"ECPay HashKey 或 HashIV 包含前後空格，已自動去除")
             
             ecpay_data = {
                 "MerchantID": ECPAY_MERCHANT_ID,
@@ -7453,14 +7483,16 @@ def create_app() -> FastAPI:
             
             # 記錄發送到 ECPay 的參數（隱藏敏感資訊）
             logger.debug(f"ECPay 參數: MerchantID={ECPAY_MERCHANT_ID}, TradeNo={trade_no}, Amount={amount}, ChoosePayment={ecpay_data.get('ChoosePayment', 'Credit')}")
+            logger.debug(f"ECPay 參數詳情: ReturnURL={ECPAY_NOTIFY_URL}, OrderResultURL={ECPAY_RETURN_URL}")
             
             # 生成簽章
             try:
                 ecpay_data["CheckMacValue"] = gen_check_mac_value(ecpay_data)
-                logger.debug(f"ECPay 簽章生成成功")
+                logger.info(f"ECPay 簽章生成成功，訂單號={trade_no}")
             except Exception as e:
                 logger.error(f"ECPay 簽章生成失敗: {e}", exc_info=True)
-                return HTMLResponse("<html><body><h1>付款系統錯誤，請聯繫客服</h1></body></html>", status_code=500)
+                logger.error(f"ECPay 環境檢查: MerchantID長度={len(ECPAY_MERCHANT_ID) if ECPAY_MERCHANT_ID else 0}, HashKey長度={hash_key_length}, HashIV長度={hash_iv_length}")
+                return HTMLResponse("<html><body><h1>付款系統錯誤，請聯繫客服</h1><p>錯誤詳情已記錄在日誌中</p></body></html>", status_code=500)
             
             # 生成 HTML 表單（自動提交到 ECPay）
             inputs = "\n".join([f'<input type="hidden" name="{k}" value="{v}"/>' for k, v in ecpay_data.items()])
