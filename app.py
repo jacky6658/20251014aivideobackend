@@ -2522,6 +2522,7 @@ def create_app() -> FastAPI:
             "/api/admin/auth/login",  # 管理員登入端點（用戶尚未登入，無法獲取 CSRF Token）
             "/api/payment/webhook",  # ECPay Webhook（使用簽章驗證）
             "/api/webhook/verify-license",  # n8n Webhook（使用 secret 驗證）
+            "/api/cron/check-renewals",  # 定時任務端點（使用 CRON_SECRET 驗證）
         ]
         
         # 檢查是否為需要 CSRF 保護的請求
