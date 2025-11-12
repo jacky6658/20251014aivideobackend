@@ -2532,6 +2532,7 @@ def create_app() -> FastAPI:
             "/api/generate/topics",  # 公開生成端點（選題推薦）
             "/api/generate/script",  # 公開生成端點（短影音腳本）
             "/api/chat/stream",  # 公開聊天端點（AI 顧問）
+            "/api/test/email",  # 測試 Email 端點（用於測試 SMTP 設定）
         ]
         
         # 檢查是否為需要 CSRF 保護的請求
