@@ -2727,8 +2727,20 @@ def create_app() -> FastAPI:
                 except Exception as ex:
                     yield f"data: {json.dumps({'type': 'error', 'content': str(ex)})}\n\n"
 
-            return StreamingResponse(generate(), media_type="text/plain")
+            # 獲取請求來源，用於 CORS headers
+            origin = request.headers.get("Origin")
+            headers = {}
+            if origin and origin in cors_origins:
+                headers["Access-Control-Allow-Origin"] = origin
+                headers["Access-Control-Allow-Credentials"] = "true"
+            
+            return StreamingResponse(
+                generate(), 
+                media_type="text/plain",
+                headers=headers
+            )
         except Exception as e:
+            logger.error(f"生成帳號定位錯誤: {str(e)}", exc_info=True)
             return handle_error_response(
                 e,
                 error_type="generate_positioning_error",
@@ -2819,8 +2831,20 @@ def create_app() -> FastAPI:
                 except Exception as ex:
                     yield f"data: {json.dumps({'type': 'error', 'content': str(ex)})}\n\n"
 
-            return StreamingResponse(generate(), media_type="text/plain")
+            # 獲取請求來源，用於 CORS headers
+            origin = request.headers.get("Origin")
+            headers = {}
+            if origin and origin in cors_origins:
+                headers["Access-Control-Allow-Origin"] = origin
+                headers["Access-Control-Allow-Credentials"] = "true"
+            
+            return StreamingResponse(
+                generate(), 
+                media_type="text/plain",
+                headers=headers
+            )
         except Exception as e:
+            logger.error(f"生成選題推薦錯誤: {str(e)}", exc_info=True)
             return handle_error_response(
                 e,
                 error_type="generate_topics_error",
@@ -3010,8 +3034,20 @@ def create_app() -> FastAPI:
                 except Exception as ex:
                     yield f"data: {json.dumps({'type': 'error', 'content': str(ex)})}\n\n"
 
-            return StreamingResponse(generate(), media_type="text/plain")
+            # 獲取請求來源，用於 CORS headers
+            origin = request.headers.get("Origin")
+            headers = {}
+            if origin and origin in cors_origins:
+                headers["Access-Control-Allow-Origin"] = origin
+                headers["Access-Control-Allow-Credentials"] = "true"
+            
+            return StreamingResponse(
+                generate(), 
+                media_type="text/plain",
+                headers=headers
+            )
         except Exception as e:
+            logger.error(f"生成腳本錯誤: {str(e)}", exc_info=True)
             return handle_error_response(
                 e,
                 error_type="generate_script_error",
