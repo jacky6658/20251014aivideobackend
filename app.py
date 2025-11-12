@@ -7408,10 +7408,10 @@ def create_app() -> FastAPI:
                 "ItemName": item_name,
                 "ReturnURL": ECPAY_NOTIFY_URL,  # 伺服器端通知
                 "OrderResultURL": f"{ECPAY_RETURN_URL}?order_id={trade_no}",  # 用戶返回頁
-                "ChoosePayment": "ALL",  # 讓用戶自行選擇付款方式（需要所有付款方式都已開通）
-                # 如果 ALL 沒有權限，可以嘗試：
-                # "ChoosePayment": "Credit",  # 只使用信用卡付款
+                "ChoosePayment": "Credit",  # 使用信用卡付款（如果 ALL 沒有權限，請改為 Credit）
+                # 如果需要支援多種付款方式，可以改為：
                 # "ChoosePayment": "Credit,ATM,CVS",  # 指定多種付款方式
+                # "ChoosePayment": "ALL",  # 讓用戶自行選擇付款方式（需要所有付款方式都已開通）
                 "EncryptType": 1,
                 "ClientBackURL": ECPAY_RETURN_URL,  # 取消付款返回頁
             }
