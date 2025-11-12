@@ -10106,6 +10106,94 @@ ReelMind 團隊
                 status_code=500
             )
 
+    @app.post("/api/test/email")
+    @rate_limit("3/minute")
+    async def test_email_send(request: Request):
+        """測試 Email 發送功能（用於確認 SMTP 設定）"""
+        try:
+            body = await request.json()
+            to_email = body.get("to_email", "").strip()
+            subject = body.get("subject", "【ReelMind】測試郵件")
+            message = body.get("message", "這是一封測試郵件，用於確認 SMTP 設定是否正確。")
+            
+            if not to_email:
+                return JSONResponse({"error": "請提供收件人 Email 地址"}, status_code=400)
+            
+            if not validate_email(to_email):
+                return JSONResponse({"error": "無效的 Email 地址格式"}, status_code=400)
+            
+            # 檢查 SMTP 設定
+            if not SMTP_ENABLED:
+                return JSONResponse({
+                    "success": False,
+                    "error": "SMTP 功能未啟用，請設定 SMTP_ENABLED=true"
+                }, status_code=503)
+            
+            if not SMTP_USER or not SMTP_PASSWORD:
+                return JSONResponse({
+                    "success": False,
+                    "error": "SMTP 帳號或密碼未設定，請設定 SMTP_USER 和 SMTP_PASSWORD"
+                }, status_code=503)
+            
+            # 構建測試郵件內容
+            email_body = f"""
+這是一封測試郵件，用於確認 ReelMind 系統的 Email 功能是否正常運作。
+
+測試訊息：
+{message}
+
+如果您收到這封郵件，表示 SMTP 設定正確，Email 功能正常。
+
+---
+ReelMind 系統自動發送
+            """.strip()
+            
+            html_body = f"""
+            <html>
+            <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+                    <h2 style="color: #2563EB;">【ReelMind】測試郵件</h2>
+                    <p>這是一封測試郵件，用於確認 ReelMind 系統的 Email 功能是否正常運作。</p>
+                    <div style="background: #F3F4F6; padding: 15px; border-radius: 8px; margin: 20px 0;">
+                        <p><strong>測試訊息：</strong></p>
+                        <p>{message}</p>
+                    </div>
+                    <p>如果您收到這封郵件，表示 <strong>SMTP 設定正確</strong>，Email 功能正常。</p>
+                    <hr style="border: none; border-top: 1px solid #E5E7EB; margin: 20px 0;">
+                    <p style="color: #6B7280; font-size: 12px;">ReelMind 系統自動發送</p>
+                </div>
+            </body>
+            </html>
+            """
+            
+            # 發送郵件
+            success = send_email(
+                to_email=to_email,
+                subject=subject,
+                body=email_body,
+                html_body=html_body
+            )
+            
+            if success:
+                logger.info(f"測試郵件已成功發送到: {to_email}")
+                return JSONResponse({
+                    "success": True,
+                    "message": f"測試郵件已成功發送到 {to_email}，請檢查收件箱（包括垃圾郵件資料夾）"
+                })
+            else:
+                logger.error(f"測試郵件發送失敗: {to_email}")
+                return JSONResponse({
+                    "success": False,
+                    "error": "郵件發送失敗，請檢查後端日誌確認具體錯誤。常見原因：SMTP 認證失敗、網路連線問題等。"
+                }, status_code=503)
+                
+        except Exception as e:
+            logger.error(f"測試郵件 API 錯誤: {e}", exc_info=True)
+            return JSONResponse({
+                "success": False,
+                "error": f"伺服器錯誤: {str(e)}"
+            }, status_code=500)
+
     @app.post("/api/admin/auth/login")
     @rate_limit("5/minute")
     async def admin_login(request: Request):
