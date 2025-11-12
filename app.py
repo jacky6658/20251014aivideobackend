@@ -7592,8 +7592,15 @@ def create_app() -> FastAPI:
             logger.error(f"[ECPay診斷] 表單參數數量={len(ecpay_data)}, action={ECPAY_API}")
             logger.error(f"[ECPay診斷] 表單參數摘要: {param_summary}")
             
-            # 生成表單 input 欄位，確保參數值正確編碼
-            inputs = "\n".join([f'<input type="hidden" name="{html.escape(str(k))}" value="{html.escape(str(v))}"/>' for k, v in ecpay_data.items()])
+            # 生成表單 input 欄位
+            # 注意：不要對參數值進行 HTML 編碼，讓瀏覽器自然處理
+            # ECPay 需要接收原始參數值，瀏覽器會自動進行 URL 編碼
+            inputs = "\n".join([f'<input type="hidden" name="{k}" value="{v}"/>' for k, v in ecpay_data.items()])
+            
+            # 記錄完整的參數值（用於診斷）
+            logger.error(f"[ECPay診斷] 完整參數值: MerchantID={ecpay_data.get('MerchantID')}, TradeNo={ecpay_data.get('MerchantTradeNo')}, Amount={ecpay_data.get('TotalAmount')}")
+            logger.error(f"[ECPay診斷] ReturnURL={ecpay_data.get('ReturnURL')}")
+            logger.error(f"[ECPay診斷] OrderResultURL={ecpay_data.get('OrderResultURL')}")
             html = f'''<!DOCTYPE html>
 <html>
 <head>
