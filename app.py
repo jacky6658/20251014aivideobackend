@@ -2474,14 +2474,19 @@ def create_app() -> FastAPI:
             if not frontend_url.startswith("http://localhost") and not frontend_url.startswith("http://127.0.0.1"):
                 print(f"WARNING: FRONTEND_URL 必須使用 HTTPS: {frontend_url}")
             else:
-                cors_origins.append(frontend_url)
+                if frontend_url not in cors_origins:
+                    cors_origins.append(frontend_url)
         else:
             # 驗證域名格式
             parsed = urlparse(frontend_url)
             if not parsed.netloc or parsed.netloc.count('.') < 1:
                 print(f"WARNING: FRONTEND_URL 格式錯誤: {frontend_url}")
             else:
-                cors_origins.append(frontend_url)
+                if frontend_url not in cors_origins:
+                    cors_origins.append(frontend_url)
+    
+    # 輸出 CORS 設定以便調試
+    print(f"INFO: CORS allowed origins: {cors_origins}")
     
     app.add_middleware(
         CORSMiddleware,
@@ -2523,6 +2528,10 @@ def create_app() -> FastAPI:
             "/api/payment/webhook",  # ECPay Webhook（使用簽章驗證）
             "/api/webhook/verify-license",  # n8n Webhook（使用 secret 驗證）
             "/api/cron/check-renewals",  # 定時任務端點（使用 CRON_SECRET 驗證）
+            "/api/generate/positioning",  # 公開生成端點（帳號定位）
+            "/api/generate/topics",  # 公開生成端點（選題推薦）
+            "/api/generate/script",  # 公開生成端點（短影音腳本）
+            "/api/chat/stream",  # 公開聊天端點（AI 顧問）
         ]
         
         # 檢查是否為需要 CSRF 保護的請求
