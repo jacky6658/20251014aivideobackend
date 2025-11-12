@@ -1051,6 +1051,13 @@ def generate_user_id(email: str) -> str:
 def gen_check_mac_value(params: dict) -> str:
     """生成 ECPay 簽章（CheckMacValue）
     
+    根據 ECPay 官方文件：
+    1. 將參數按照參數名稱排序（A-Z）
+    2. 組合成查詢字串：key1=value1&key2=value2&...
+    3. 組合原始字串：HashKey={HashKey}&{查詢字串}&HashIV={HashIV}
+    4. URL 編碼並轉小寫，將 %20 替換為 +
+    5. SHA256 雜湊並轉大寫
+    
     Args:
         params: 包含所有參數的字典（不包含 CheckMacValue）
     
@@ -1067,20 +1074,27 @@ def gen_check_mac_value(params: dict) -> str:
     if not hash_key or not hash_iv:
         raise ValueError("ECPAY_HASH_KEY 或 ECPAY_HASH_IV 為空")
     
-    # 移除 CheckMacValue（如果存在）
+    # 移除 CheckMacValue（如果存在）和 None 值
     items = [(k, str(v)) for k, v in params.items() if k != "CheckMacValue" and v is not None]
-    # 按照參數名稱排序
+    
+    # 按照參數名稱排序（A-Z）
     items.sort(key=lambda x: x[0])
-    # 組合成查詢字串
+    
+    # 組合成查詢字串：key1=value1&key2=value2&...
     query = "&".join([f"{k}={v}" for k, v in items])
-    # 組合原始字串
+    
+    # 組合原始字串：HashKey={HashKey}&{查詢字串}&HashIV={HashIV}
     raw = f"HashKey={hash_key}&{query}&HashIV={hash_iv}"
     
     # URL 編碼並轉小寫，將 %20 替換為 +
     import urllib.parse
-    # 根據 ECPay 官方文件，使用 quote 進行 URL 編碼，然後轉小寫，將 %20 替換為 +
+    # 根據 ECPay 官方文件，使用 quote 進行 URL 編碼
     # safe="()!*" 保留這些字元不編碼（根據 ECPay 官方文件）
-    urlencoded = urllib.parse.quote(raw, safe="()!*").lower().replace("%20", "+")
+    urlencoded = urllib.parse.quote(raw, safe="()!*")
+    # 轉小寫
+    urlencoded = urlencoded.lower()
+    # 將 %20 替換為 +（空格）
+    urlencoded = urlencoded.replace("%20", "+")
     
     # SHA256 雜湊並轉大寫
     signature = hashlib.sha256(urlencoded.encode("utf-8")).hexdigest().upper()
@@ -1089,6 +1103,7 @@ def gen_check_mac_value(params: dict) -> str:
     import logging
     logger = logging.getLogger(__name__)
     logger.debug(f"CheckMacValue 生成: 參數數量={len(items)}, HashKey長度={len(hash_key)}, HashIV長度={len(hash_iv)}")
+    logger.debug(f"CheckMacValue 原始字串長度={len(raw)}, URL編碼後長度={len(urlencoded)}")
     
     return signature
 
@@ -7327,6 +7342,69 @@ def create_app() -> FastAPI:
 
     # ===== ECPay 金流串接 =====
     
+    # 測試端點：檢查 ECPay 環境變數和 CheckMacValue 生成
+    @app.get("/api/payment/test-checkmac")
+    async def test_checkmac_value():
+        """測試 CheckMacValue 生成（僅用於診斷）"""
+        try:
+            # 檢查環境變數
+            env_status = {
+                "ECPAY_MERCHANT_ID": "已設定" if ECPAY_MERCHANT_ID else "未設定",
+                "ECPAY_HASH_KEY": "已設定" if ECPAY_HASH_KEY else "未設定",
+                "ECPAY_HASH_IV": "已設定" if ECPAY_HASH_IV else "未設定",
+                "ECPAY_API": ECPAY_API or "未設定"
+            }
+            
+            if not ECPAY_MERCHANT_ID or not ECPAY_HASH_KEY or not ECPAY_HASH_IV:
+                return {
+                    "status": "error",
+                    "message": "環境變數未設定完整",
+                    "env_status": env_status
+                }
+            
+            # 準備測試參數
+            test_params = {
+                "MerchantID": ECPAY_MERCHANT_ID,
+                "MerchantTradeNo": "TEST" + str(int(time.time())),
+                "MerchantTradeDate": get_taiwan_time().strftime("%Y/%m/%d %H:%M:%S"),
+                "PaymentType": "aio",
+                "TotalAmount": 100,
+                "TradeDesc": "測試商品",
+                "ItemName": "測試商品",
+                "ReturnURL": ECPAY_NOTIFY_URL,
+                "OrderResultURL": ECPAY_RETURN_URL,
+                "ChoosePayment": "Credit",
+                "EncryptType": 1,
+                "ClientBackURL": ECPAY_RETURN_URL,
+            }
+            
+            # 生成 CheckMacValue
+            checkmac = gen_check_mac_value(test_params)
+            
+            # 記錄診斷資訊
+            logger.error(f"[ECPay測試] 環境變數檢查: {env_status}")
+            logger.error(f"[ECPay測試] HashKey長度={len(ECPAY_HASH_KEY.strip())}, HashIV長度={len(ECPAY_HASH_IV.strip())}")
+            logger.error(f"[ECPay測試] CheckMacValue生成成功: {checkmac[:16]}...")
+            
+            return {
+                "status": "success",
+                "message": "CheckMacValue 生成成功",
+                "env_status": env_status,
+                "hash_key_length": len(ECPAY_HASH_KEY.strip()),
+                "hash_iv_length": len(ECPAY_HASH_IV.strip()),
+                "hash_key_preview": ECPAY_HASH_KEY[:4] + "..." if len(ECPAY_HASH_KEY) > 4 else ECPAY_HASH_KEY,
+                "hash_iv_preview": ECPAY_HASH_IV[:4] + "..." if len(ECPAY_HASH_IV) > 4 else ECPAY_HASH_IV,
+                "checkmac_preview": checkmac[:16] + "...",
+                "test_params": {k: v for k, v in test_params.items() if k not in ["ReturnURL", "OrderResultURL", "ClientBackURL"]}
+            }
+        except Exception as e:
+            logger.error(f"[ECPay測試] 錯誤: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e),
+                "env_status": env_status if 'env_status' in locals() else {}
+            }
+    
     @app.post("/api/payment/checkout", response_class=HTMLResponse)
     @rate_limit("10/minute")  # 添加 Rate Limiting
     async def create_payment_order(request: Request, current_user_id: Optional[str] = Depends(get_current_user)):
@@ -7448,11 +7526,14 @@ def create_app() -> FastAPI:
             trade_date = get_taiwan_time().strftime("%Y/%m/%d %H:%M:%S")
             item_name = f"ReelMind {'月費' if plan == 'monthly' else '年費'}方案"
             
-            # 記錄 ECPay 設定狀態（用於調試）
+            # 記錄 ECPay 設定狀態（用於調試）- 使用 ERROR 級別確保在 Zeabur 日誌中可見
             merchant_id_preview = ECPAY_MERCHANT_ID[:4] + "..." if ECPAY_MERCHANT_ID and len(ECPAY_MERCHANT_ID) > 4 else (ECPAY_MERCHANT_ID or "None")
             hash_key_length = len(ECPAY_HASH_KEY.strip()) if ECPAY_HASH_KEY else 0
             hash_iv_length = len(ECPAY_HASH_IV.strip()) if ECPAY_HASH_IV else 0
-            logger.info(f"ECPay 設定檢查: MerchantID={merchant_id_preview}, API={ECPAY_API}, HashKey長度={hash_key_length}, HashIV長度={hash_iv_length}, 金額={amount}")
+            hash_key_preview = ECPAY_HASH_KEY[:4] + "..." if ECPAY_HASH_KEY and len(ECPAY_HASH_KEY) > 4 else (ECPAY_HASH_KEY or "None")
+            hash_iv_preview = ECPAY_HASH_IV[:4] + "..." if ECPAY_HASH_IV and len(ECPAY_HASH_IV) > 4 else (ECPAY_HASH_IV or "None")
+            # 使用 ERROR 級別確保在 Zeabur 日誌中可見
+            logger.error(f"[ECPay診斷] MerchantID={merchant_id_preview}, API={ECPAY_API}, HashKey={hash_key_preview}(長度={hash_key_length}), HashIV={hash_iv_preview}(長度={hash_iv_length}), 金額={amount}")
             
             # 檢查環境變數是否設定正確
             if not ECPAY_MERCHANT_ID or not ECPAY_HASH_KEY or not ECPAY_HASH_IV:
@@ -7488,10 +7569,11 @@ def create_app() -> FastAPI:
             # 生成簽章
             try:
                 ecpay_data["CheckMacValue"] = gen_check_mac_value(ecpay_data)
-                logger.info(f"ECPay 簽章生成成功，訂單號={trade_no}")
+                # 使用 ERROR 級別確保在 Zeabur 日誌中可見
+                logger.error(f"[ECPay診斷] 簽章生成成功，訂單號={trade_no}, CheckMacValue={ecpay_data['CheckMacValue'][:16]}...")
             except Exception as e:
-                logger.error(f"ECPay 簽章生成失敗: {e}", exc_info=True)
-                logger.error(f"ECPay 環境檢查: MerchantID長度={len(ECPAY_MERCHANT_ID) if ECPAY_MERCHANT_ID else 0}, HashKey長度={hash_key_length}, HashIV長度={hash_iv_length}")
+                logger.error(f"[ECPay診斷] 簽章生成失敗: {e}", exc_info=True)
+                logger.error(f"[ECPay診斷] 環境檢查: MerchantID長度={len(ECPAY_MERCHANT_ID) if ECPAY_MERCHANT_ID else 0}, HashKey長度={hash_key_length}, HashIV長度={hash_iv_length}")
                 return HTMLResponse("<html><body><h1>付款系統錯誤，請聯繫客服</h1><p>錯誤詳情已記錄在日誌中</p></body></html>", status_code=500)
             
             # 生成 HTML 表單（自動提交到 ECPay）
