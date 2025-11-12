@@ -7577,7 +7577,23 @@ def create_app() -> FastAPI:
                 return HTMLResponse("<html><body><h1>付款系統錯誤，請聯繫客服</h1><p>錯誤詳情已記錄在日誌中</p></body></html>", status_code=500)
             
             # 生成 HTML 表單（自動提交到 ECPay）
-            inputs = "\n".join([f'<input type="hidden" name="{k}" value="{v}"/>' for k, v in ecpay_data.items()])
+            # 使用 html.escape 確保參數值正確編碼，避免特殊字元導致問題
+            import html
+            # 記錄所有參數值（用於診斷，隱藏敏感資訊）
+            param_summary = {}
+            for k, v in ecpay_data.items():
+                if k == "CheckMacValue":
+                    param_summary[k] = str(v)[:16] + "..."
+                elif k in ["HashKey", "HashIV"]:
+                    param_summary[k] = "***"  # 不記錄敏感資訊
+                else:
+                    param_summary[k] = str(v)[:50] if len(str(v)) > 50 else str(v)
+            
+            logger.error(f"[ECPay診斷] 表單參數數量={len(ecpay_data)}, action={ECPAY_API}")
+            logger.error(f"[ECPay診斷] 表單參數摘要: {param_summary}")
+            
+            # 生成表單 input 欄位，確保參數值正確編碼
+            inputs = "\n".join([f'<input type="hidden" name="{html.escape(str(k))}" value="{html.escape(str(v))}"/>' for k, v in ecpay_data.items()])
             html = f'''<!DOCTYPE html>
 <html>
 <head>
