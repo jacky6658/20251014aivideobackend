@@ -1,0 +1,60 @@
+name: 自動續費檢查
+
+on:
+  schedule:
+    # 每天凌晨 2:00（台灣時間 UTC+8 = UTC 18:00）
+    # Cron 格式：分 時 日 月 星期
+    - cron: '0 18 * * *'
+  workflow_dispatch:  # 允許手動觸發（在 GitHub Actions 頁面可以手動執行）
+
+jobs:
+  check-renewals:
+    runs-on: ubuntu-latest
+    name: 檢查並建立續費訂單
+    
+    steps:
+      - name: 調用續費檢查 API
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          API_URL: ${{ secrets.API_URL || 'https://aivideobackend.zeabur.app' }}
+        run: |
+          echo "開始執行自動續費檢查..."
+          
+          # 檢查是否設定了 CRON_SECRET
+          if [ -z "$CRON_SECRET" ]; then
+            echo "⚠️  警告：未設定 CRON_SECRET，將不使用安全驗證"
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+              -H "Content-Type: application/json" \
+              "${API_URL}/api/cron/check-renewals")
+          else
+            echo "✅ 使用 CRON_SECRET 進行安全驗證"
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+              -H "X-Cron-Secret: ${CRON_SECRET}" \
+              -H "Content-Type: application/json" \
+              "${API_URL}/api/cron/check-renewals")
+          fi
+          
+          # 分離回應內容和 HTTP 狀態碼
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          echo "HTTP 狀態碼: $HTTP_CODE"
+          echo "回應內容:"
+          echo "$BODY" | jq '.' 2>/dev/null || echo "$BODY"
+          
+          # 檢查 HTTP 狀態碼
+          if [ "$HTTP_CODE" -eq 200 ]; then
+            echo "✅ 自動續費檢查執行成功"
+            
+            # 嘗試解析 JSON 回應（如果 jq 可用）
+            if command -v jq &> /dev/null; then
+              FOUND_COUNT=$(echo "$BODY" | jq -r '.found_count // 0')
+              PROCESSED_COUNT=$(echo "$BODY" | jq -r '.processed | length // 0')
+              echo "找到即將到期的訂閱: $FOUND_COUNT"
+              echo "已處理的訂單: $PROCESSED_COUNT"
+            fi
+          else
+            echo "❌ 自動續費檢查執行失敗 (HTTP $HTTP_CODE)"
+            echo "回應內容: $BODY"
+            exit 1
+          fi
