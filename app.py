@@ -644,6 +644,14 @@ def init_database():
             ]
             
             for col_name, col_type in new_columns:
+                # 驗證欄位名稱和類型（防止 SQL 注入）
+                if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', col_name):
+                    print(f"WARN: 無效的欄位名稱: {col_name}")
+                    continue
+                if not re.match(r'^(TEXT|INTEGER|REAL|TIMESTAMP|BOOLEAN)$', col_type, re.IGNORECASE):
+                    print(f"WARN: 無效的欄位類型: {col_type}")
+                    continue
+                
                 cursor.execute("""
                     SELECT column_name 
                     FROM information_schema.columns 
@@ -651,6 +659,7 @@ def init_database():
                 """, (col_name,))
                 if not cursor.fetchone():
                     try:
+                        # 使用參數化查詢（雖然 ALTER TABLE 不支持參數化，但已驗證 col_name 和 col_type）
                         cursor.execute(f"ALTER TABLE orders ADD COLUMN {col_name} {col_type}")
                         print(f"INFO: 已新增欄位 orders.{col_name}")
                     except Exception as e:
@@ -674,8 +683,17 @@ def init_database():
             ]
             
             for col_name, col_type in new_columns:
+                # 驗證欄位名稱和類型（防止 SQL 注入）
+                if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', col_name):
+                    print(f"WARN: 無效的欄位名稱: {col_name}")
+                    continue
+                if not re.match(r'^(TEXT|INTEGER|REAL|TIMESTAMP|BOOLEAN)$', col_type, re.IGNORECASE):
+                    print(f"WARN: 無效的欄位類型: {col_type}")
+                    continue
+                
                 if col_name not in existing_columns:
                     try:
+                        # 使用參數化查詢（雖然 ALTER TABLE 不支持參數化，但已驗證 col_name 和 col_type）
                         cursor.execute(f"ALTER TABLE orders ADD COLUMN {col_name} {col_type}")
                         print(f"INFO: 已新增欄位 orders.{col_name}")
                     except Exception as e:
@@ -2900,31 +2918,45 @@ def create_app() -> FastAPI:
         structure_instruction = structure_instructions.get(script_structure, structure_instructions['A'])
         
         # 根據時長和結構計算時間分配
-        duration = int(body.duration or 30)
+        # 處理 duration 格式（可能是 '60秒' 或 '60'）
+        duration_str = str(body.duration or '30').strip()
+        # 提取數字部分（移除 '秒' 等非數字字符）
+        duration_match = re.search(r'\d+', duration_str)
+        if duration_match:
+            duration = int(duration_match.group())
+        else:
+            duration = 30  # 預設值
+        logger.info(f"解析 duration: '{duration_str}' -> {duration}")
         
         # 定義各結構的時間分配（根據時長動態調整）
+        # 確保所有秒數（15/30/45/60）和所有結構（A/B/C/D/E）都有對應的時間分配
         time_allocations = {
             'A': {
+                15: [{'start': 0, 'end': 3, 'section': 'Hook'}, {'start': 3, 'end': 12, 'section': 'Value'}, {'start': 12, 'end': 15, 'section': 'CTA'}],
                 30: [{'start': 0, 'end': 5, 'section': 'Hook'}, {'start': 5, 'end': 25, 'section': 'Value'}, {'start': 25, 'end': 30, 'section': 'CTA'}],
                 45: [{'start': 0, 'end': 7, 'section': 'Hook'}, {'start': 7, 'end': 38, 'section': 'Value'}, {'start': 38, 'end': 45, 'section': 'CTA'}],
                 60: [{'start': 0, 'end': 10, 'section': 'Hook'}, {'start': 10, 'end': 52, 'section': 'Value'}, {'start': 52, 'end': 60, 'section': 'CTA'}]
             },
             'B': {
+                15: [{'start': 0, 'end': 4, 'section': '問題'}, {'start': 4, 'end': 11, 'section': '解決'}, {'start': 11, 'end': 15, 'section': '證明'}],
                 30: [{'start': 0, 'end': 8, 'section': '問題'}, {'start': 8, 'end': 22, 'section': '解決'}, {'start': 22, 'end': 30, 'section': '證明'}],
                 45: [{'start': 0, 'end': 12, 'section': '問題'}, {'start': 12, 'end': 35, 'section': '解決'}, {'start': 35, 'end': 45, 'section': '證明'}],
                 60: [{'start': 0, 'end': 15, 'section': '問題'}, {'start': 15, 'end': 48, 'section': '解決'}, {'start': 48, 'end': 60, 'section': '證明'}]
             },
             'C': {
+                15: [{'start': 0, 'end': 3, 'section': 'After'}, {'start': 3, 'end': 10, 'section': 'Before'}, {'start': 10, 'end': 15, 'section': '秘密揭露'}],
                 30: [{'start': 0, 'end': 5, 'section': 'After'}, {'start': 5, 'end': 20, 'section': 'Before'}, {'start': 20, 'end': 30, 'section': '秘密揭露'}],
                 45: [{'start': 0, 'end': 7, 'section': 'After'}, {'start': 7, 'end': 32, 'section': 'Before'}, {'start': 32, 'end': 45, 'section': '秘密揭露'}],
                 60: [{'start': 0, 'end': 10, 'section': 'After'}, {'start': 10, 'end': 45, 'section': 'Before'}, {'start': 45, 'end': 60, 'section': '秘密揭露'}]
             },
             'D': {
+                15: [{'start': 0, 'end': 3, 'section': '迷思'}, {'start': 3, 'end': 8, 'section': '原理'}, {'start': 8, 'end': 12, 'section': '要點'}, {'start': 12, 'end': 15, 'section': '行動'}],
                 30: [{'start': 0, 'end': 6, 'section': '迷思'}, {'start': 6, 'end': 15, 'section': '原理'}, {'start': 15, 'end': 24, 'section': '要點'}, {'start': 24, 'end': 30, 'section': '行動'}],
                 45: [{'start': 0, 'end': 9, 'section': '迷思'}, {'start': 9, 'end': 22, 'section': '原理'}, {'start': 22, 'end': 36, 'section': '要點'}, {'start': 36, 'end': 45, 'section': '行動'}],
                 60: [{'start': 0, 'end': 12, 'section': '迷思'}, {'start': 12, 'end': 30, 'section': '原理'}, {'start': 30, 'end': 48, 'section': '要點'}, {'start': 48, 'end': 60, 'section': '行動'}]
             },
             'E': {
+                15: [{'start': 0, 'end': 4, 'section': '起'}, {'start': 4, 'end': 8, 'section': '承'}, {'start': 8, 'end': 12, 'section': '轉'}, {'start': 12, 'end': 15, 'section': '合'}],
                 30: [{'start': 0, 'end': 7, 'section': '起'}, {'start': 7, 'end': 15, 'section': '承'}, {'start': 15, 'end': 23, 'section': '轉'}, {'start': 23, 'end': 30, 'section': '合'}],
                 45: [{'start': 0, 'end': 10, 'section': '起'}, {'start': 10, 'end': 22, 'section': '承'}, {'start': 22, 'end': 35, 'section': '轉'}, {'start': 35, 'end': 45, 'section': '合'}],
                 60: [{'start': 0, 'end': 13, 'section': '起'}, {'start': 13, 'end': 30, 'section': '承'}, {'start': 30, 'end': 47, 'section': '轉'}, {'start': 47, 'end': 60, 'section': '合'}]
@@ -8093,7 +8125,15 @@ def create_app() -> FastAPI:
             
             # 檢查是否已啟用
             if status == "activated":
-                return JSONResponse({"error": "此授權連結已使用"}, status_code=400)
+                # 返回更詳細的錯誤訊息，包括啟用時間和啟用用戶資訊
+                activated_info = {
+                    "error": "此授權連結已使用",
+                    "message": "此授權連結已被使用，無法重複啟用",
+                    "activated_at": activated_at.isoformat() if activated_at else None,
+                    "activated_by": activated_by_user_id if activated_by_user_id else None,
+                    "contact": "如有問題請聯繫客服：aiagent168168@gmail.com"
+                }
+                return JSONResponse(activated_info, status_code=400)
             
             # 檢查連結是否過期
             if link_expires_at:
@@ -8116,7 +8156,15 @@ def create_app() -> FastAPI:
                         )
                     if not use_postgresql:
                         conn.commit()
-                    return JSONResponse({"error": "授權連結已過期"}, status_code=400)
+                    # 返回更詳細的錯誤訊息，包括過期時間和聯繫方式
+                    expired_info = {
+                        "error": "授權連結已過期",
+                        "message": "此授權連結已超過有效期限（7天），無法使用",
+                        "expired_at": expire_dt.isoformat(),
+                        "contact": "如有問題請聯繫客服：aiagent168168@gmail.com",
+                        "suggestion": "請聯繫原購買通路重新申請授權連結"
+                    }
+                    return JSONResponse(expired_info, status_code=400)
             
             # 如果用戶未登入，導向登入頁（帶上 token）
             if not current_user_id:
