@@ -3204,6 +3204,36 @@ def create_app() -> FastAPI:
                 # === 保存記憶 ===
                 if user_id and ai_response:
                     # 1. 保存到短期記憶（STM）- 新增
+                    # 判斷是否為整合後的對話（ip_planning 類型且包含特定功能）
+                    is_integrated = False
+                    conversation_phase = None
+                    has_video_ratio = False
+                    has_script_structure = False
+                    positioning_keywords = []
+                    
+                    if body.conversation_type == 'ip_planning':
+                        is_integrated = True
+                        # 判斷對話階段（簡單關鍵字匹配）
+                        message_lower = body.message.lower()
+                        if any(kw in message_lower for kw in ['定位', '帳號定位', '重新定位']):
+                            conversation_phase = 'positioning'
+                        elif any(kw in message_lower for kw in ['選題', '配比', '類型', '策略']):
+                            conversation_phase = 'topics'
+                        elif any(kw in message_lower for kw in ['腳本', 'script', '結構']):
+                            conversation_phase = 'scripts'
+                            has_script_structure = any(kw in message_lower for kw in ['a', 'b', 'c', 'd', 'e'])
+                        # 檢查是否討論過影片類型配比
+                        if any(kw in message_lower for kw in ['配比', '比例', '類型配比', '策略矩陣']):
+                            has_video_ratio = True
+                        # 提取定位關鍵字（簡單提取）
+                        if conversation_phase == 'positioning':
+                            # 提取可能的關鍵字（行業、目標受眾等）
+                            keywords = []
+                            for kw in ['健身', '減脂', 'AI', '職場', '教育', '行銷', '創業', '理財', '美食', '旅遊']:
+                                if kw in body.message:
+                                    keywords.append(kw)
+                            positioning_keywords = keywords
+                    
                     stm.add_turn(
                         user_id=user_id,
                         user_message=body.message,
@@ -3211,7 +3241,12 @@ def create_app() -> FastAPI:
                         metadata={
                             "platform": body.platform,
                             "topic": body.topic,
-                            "profile": body.profile
+                            "profile": body.profile,
+                            "is_integrated": is_integrated,
+                            "conversation_phase": conversation_phase,
+                            "has_video_ratio": has_video_ratio,
+                            "has_script_structure": has_script_structure,
+                            "positioning_keywords": positioning_keywords
                         }
                     )
                     
