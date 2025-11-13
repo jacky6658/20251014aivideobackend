@@ -7510,9 +7510,9 @@ def create_app() -> FastAPI:
             checkmac = gen_check_mac_value(test_params)
             
             # 記錄診斷資訊
-            logger.error(f"[ECPay測試] 環境變數檢查: {env_status}")
-            logger.error(f"[ECPay測試] HashKey長度={len(ECPAY_HASH_KEY.strip())}, HashIV長度={len(ECPAY_HASH_IV.strip())}")
-            logger.error(f"[ECPay測試] CheckMacValue生成成功: {checkmac[:16]}...")
+            logger.info(f"[ECPay測試] 環境變數檢查: {env_status}")
+            logger.info(f"[ECPay測試] HashKey長度={len(ECPAY_HASH_KEY.strip())}, HashIV長度={len(ECPAY_HASH_IV.strip())}")
+            logger.info(f"[ECPay測試] CheckMacValue生成成功: {checkmac[:16]}...")
             
             return {
                 "status": "success",
@@ -7659,14 +7659,14 @@ def create_app() -> FastAPI:
             trade_date = get_taiwan_time().strftime("%Y/%m/%d %H:%M:%S")
             item_name = f"ReelMind {'月費' if plan == 'monthly' else '年費'}方案"
             
-            # 記錄 ECPay 設定狀態（用於調試）- 使用 ERROR 級別確保在 Zeabur 日誌中可見
+            # 記錄 ECPay 設定狀態（用於調試）
             merchant_id_preview = ECPAY_MERCHANT_ID[:4] + "..." if ECPAY_MERCHANT_ID and len(ECPAY_MERCHANT_ID) > 4 else (ECPAY_MERCHANT_ID or "None")
             hash_key_length = len(ECPAY_HASH_KEY.strip()) if ECPAY_HASH_KEY else 0
             hash_iv_length = len(ECPAY_HASH_IV.strip()) if ECPAY_HASH_IV else 0
             hash_key_preview = ECPAY_HASH_KEY[:4] + "..." if ECPAY_HASH_KEY and len(ECPAY_HASH_KEY) > 4 else (ECPAY_HASH_KEY or "None")
             hash_iv_preview = ECPAY_HASH_IV[:4] + "..." if ECPAY_HASH_IV and len(ECPAY_HASH_IV) > 4 else (ECPAY_HASH_IV or "None")
-            # 使用 ERROR 級別確保在 Zeabur 日誌中可見
-            logger.error(f"[ECPay診斷] MerchantID={merchant_id_preview}, API={ECPAY_API}, HashKey={hash_key_preview}(長度={hash_key_length}), HashIV={hash_iv_preview}(長度={hash_iv_length}), 金額={amount}")
+            # 使用 INFO 級別記錄正常的診斷資訊
+            logger.info(f"[ECPay診斷] MerchantID={merchant_id_preview}, API={ECPAY_API}, HashKey={hash_key_preview}(長度={hash_key_length}), HashIV={hash_iv_preview}(長度={hash_iv_length}), 金額={amount}")
             
             # 檢查環境變數是否設定正確
             if not ECPAY_MERCHANT_ID or not ECPAY_HASH_KEY or not ECPAY_HASH_IV:
@@ -7695,10 +7695,10 @@ def create_app() -> FastAPI:
             order_result_url_full = f"{return_url_base}?order_id={trade_no}"
             
             # 立即驗證 URL 完整性
-            logger.error(f"[ECPay URL構建] backend_base_url={backend_base_url} (長度: {len(backend_base_url)})")
-            logger.error(f"[ECPay URL構建] return_url_base={return_url_base} (長度: {len(return_url_base)})")
-            logger.error(f"[ECPay URL構建] ReturnURL完整值={return_url_full} (長度: {len(return_url_full)})")
-            logger.error(f"[ECPay URL構建] OrderResultURL完整值={order_result_url_full} (長度: {len(order_result_url_full)})")
+            logger.info(f"[ECPay URL構建] backend_base_url={backend_base_url} (長度: {len(backend_base_url)})")
+            logger.info(f"[ECPay URL構建] return_url_base={return_url_base} (長度: {len(return_url_base)})")
+            logger.info(f"[ECPay URL構建] ReturnURL完整值={return_url_full} (長度: {len(return_url_full)})")
+            logger.info(f"[ECPay URL構建] OrderResultURL完整值={order_result_url_full} (長度: {len(order_result_url_full)})")
             
             # 驗證 URL 格式（確保包含 http:// 或 https://）
             if not return_url_full.startswith(('http://', 'https://')):
@@ -7728,9 +7728,9 @@ def create_app() -> FastAPI:
                 logger.error(f"[ECPay錯誤] OrderResultURL 在 ecpay_data 中被修改！原始: {order_result_url_full}, 當前: {ecpay_data.get('OrderResultURL')}")
             
             # 記錄發送到 ECPay 的參數（完整記錄，不截斷）
-            logger.error(f"[ECPay參數構建] MerchantID={ECPAY_MERCHANT_ID}, TradeNo={trade_no}, Amount={amount}")
-            logger.error(f"[ECPay參數構建] ReturnURL={ecpay_data.get('ReturnURL')} (長度: {len(ecpay_data.get('ReturnURL', ''))})")
-            logger.error(f"[ECPay參數構建] OrderResultURL={ecpay_data.get('OrderResultURL')} (長度: {len(ecpay_data.get('OrderResultURL', ''))})")
+            logger.info(f"[ECPay參數構建] MerchantID={ECPAY_MERCHANT_ID}, TradeNo={trade_no}, Amount={amount}")
+            logger.info(f"[ECPay參數構建] ReturnURL={ecpay_data.get('ReturnURL')} (長度: {len(ecpay_data.get('ReturnURL', ''))})")
+            logger.info(f"[ECPay參數構建] OrderResultURL={ecpay_data.get('OrderResultURL')} (長度: {len(ecpay_data.get('OrderResultURL', ''))})")
             
             # 生成簽章
             try:
@@ -7751,9 +7751,9 @@ def create_app() -> FastAPI:
                 
                 ecpay_data["ClientBackURL"] = CLIENT_BACK_URL
                 ecpay_data["CheckMacValue"] = gen_check_mac_value(ecpay_data)
-                # 使用 ERROR 級別確保在 Zeabur 日誌中可見
-                logger.error(f"[ECPay REQUEST PAYLOAD] CheckMacValue={ecpay_data['CheckMacValue']}")
-                logger.error(f"[ECPay診斷] 簽章生成成功，訂單號={trade_no}, CheckMacValue={ecpay_data['CheckMacValue'][:16]}...")
+                # 使用 INFO 級別記錄成功的操作
+                logger.info(f"[ECPay REQUEST PAYLOAD] CheckMacValue={ecpay_data['CheckMacValue']}")
+                logger.info(f"[ECPay診斷] 簽章生成成功，訂單號={trade_no}, CheckMacValue={ecpay_data['CheckMacValue'][:16]}...")
             except Exception as e:
                 logger.error(f"[ECPay診斷] 簽章生成失敗: {e}", exc_info=True)
                 logger.error(f"[ECPay診斷] 環境檢查: MerchantID長度={len(ECPAY_MERCHANT_ID) if ECPAY_MERCHANT_ID else 0}, HashKey長度={hash_key_length}, HashIV長度={hash_iv_length}")
@@ -7763,22 +7763,22 @@ def create_app() -> FastAPI:
             # 安全的表單生成器：確保所有參數完整無截斷
             import html
             
-            # 生成前完整記錄所有參數（用於診斷）
-            logger.error(f"[ECPay FINAL POST PARAM] 開始生成表單，參數總數={len(ecpay_data)}")
+            # 生成前完整記錄所有參數（用於診斷）- 使用 DEBUG 級別記錄詳細資訊
+            logger.debug(f"[ECPay FINAL POST PARAM] 開始生成表單，參數總數={len(ecpay_data)}")
             for key, value in ecpay_data.items():
                 # 完整記錄每個參數，不截斷
                 if key == "CheckMacValue":
                     # CheckMacValue 只記錄前32字符（用於診斷）
-                    logger.error(f"[ECPay FINAL POST PARAM] {key} = {str(value)[:32]}... (完整長度: {len(str(value))})")
+                    logger.debug(f"[ECPay FINAL POST PARAM] {key} = {str(value)[:32]}... (完整長度: {len(str(value))})")
                 else:
                     # 其他參數完整記錄
-                    logger.error(f"[ECPay FINAL POST PARAM] {key} = {str(value)} (長度: {len(str(value))})")
+                    logger.debug(f"[ECPay FINAL POST PARAM] {key} = {str(value)} (長度: {len(str(value))})")
             
             # 特別檢查 URL 參數的完整性
             return_url = ecpay_data.get('ReturnURL', '')
             order_result_url = ecpay_data.get('OrderResultURL', '')
-            logger.error(f"[ECPay URL檢查] ReturnURL完整值: {return_url} (長度: {len(return_url)})")
-            logger.error(f"[ECPay URL檢查] OrderResultURL完整值: {order_result_url} (長度: {len(order_result_url)})")
+            logger.debug(f"[ECPay URL檢查] ReturnURL完整值: {return_url} (長度: {len(return_url)})")
+            logger.debug(f"[ECPay URL檢查] OrderResultURL完整值: {order_result_url} (長度: {len(order_result_url)})")
             
             # 驗證 URL 完整性（確保沒有被截斷）
             if return_url and len(return_url) < 10:
@@ -7817,7 +7817,7 @@ def create_app() -> FastAPI:
             if order_result_url and order_result_url not in inputs:
                 logger.error(f"[ECPay錯誤] OrderResultURL 在最終 HTML 中缺失！原始值: {order_result_url}")
             
-            logger.error(f"[ECPay診斷] 表單生成完成，input 欄位數量={len(input_lines)}, HTML 總長度={len(inputs)}")
+            logger.info(f"[ECPay診斷] 表單生成完成，input 欄位數量={len(input_lines)}, HTML 總長度={len(inputs)}")
             html = f'''<!DOCTYPE html>
 <html>
 <head>
