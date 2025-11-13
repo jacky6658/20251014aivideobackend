@@ -8802,7 +8802,61 @@ def create_app() -> FastAPI:
             
             # 檢查是否已啟用
             if status == "activated":
-                # 返回更詳細的錯誤訊息，包括啟用時間和啟用用戶資訊
+                # 如果用戶已登入，檢查是否為同一個帳戶
+                if current_user_id:
+                    # 獲取當前用戶的 email
+                    user_email = None
+                    try:
+                        if use_postgresql:
+                            cursor.execute(
+                                "SELECT email FROM user_auth WHERE user_id = %s",
+                                (current_user_id,)
+                            )
+                        else:
+                            cursor.execute(
+                                "SELECT email FROM user_auth WHERE user_id = ?",
+                                (current_user_id,)
+                            )
+                        user_result = cursor.fetchone()
+                        if user_result:
+                            user_email = user_result[0]
+                    except Exception as e:
+                        logger.warning(f"獲取用戶 email 失敗: {e}")
+                    
+                    # 檢查是否為同一個帳戶（email 匹配）且用戶已有訂閱
+                    if user_email and user_email.lower() == email.lower():
+                        # 檢查用戶是否已有訂閱
+                        try:
+                            if use_postgresql:
+                                cursor.execute(
+                                    "SELECT is_subscribed FROM user_auth WHERE user_id = %s",
+                                    (current_user_id,)
+                                )
+                            else:
+                                cursor.execute(
+                                    "SELECT is_subscribed FROM user_auth WHERE user_id = ?",
+                                    (current_user_id,)
+                                )
+                            user_result = cursor.fetchone()
+                            is_subscribed = user_result and (user_result[0] == 1 or user_result[0] is True) if user_result else False
+                            
+                            if is_subscribed:
+                                # 同一個帳戶且已有訂閱，返回友好訊息
+                                activated_at_iso = None
+                                if activated_at:
+                                    activated_at_aware = ensure_timezone_aware(activated_at) if isinstance(activated_at, datetime) else activated_at
+                                    activated_at_iso = activated_at_aware.isoformat() if isinstance(activated_at_aware, datetime) else str(activated_at_aware)
+                                
+                                return {
+                                    "status": "already_activated",
+                                    "message": "您已經啟用此授權了！",
+                                    "activated_at": activated_at_iso,
+                                    "is_subscribed": True
+                                }
+                        except Exception as e:
+                            logger.warning(f"檢查訂閱狀態失敗: {e}")
+                
+                # 如果不是同一個帳戶，或無法確認，返回標準錯誤訊息
                 activated_at_iso = None
                 if activated_at:
                     # 確保 activated_at 是 timezone-aware 再轉換為 ISO 格式
