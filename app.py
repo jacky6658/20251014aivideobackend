@@ -1049,14 +1049,25 @@ def generate_user_id(email: str) -> str:
 # ===== ECPay 金流功能 =====
 
 def gen_check_mac_value(params: dict) -> str:
-    """生成 ECPay 簽章（CheckMacValue）
+    """生成 ECPay 簽章（CheckMacValue）- 修正版
     
-    根據 ECPay 官方文件：
-    1. 將參數按照參數名稱排序（A-Z）
-    2. 組合成查詢字串：key1=value1&key2=value2&...
-    3. 組合原始字串：HashKey={HashKey}&{查詢字串}&HashIV={HashIV}
-    4. URL 編碼並轉小寫，將 %20 替換為 +
-    5. SHA256 雜湊並轉大寫
+    根據 ECPay 官方文件（SHA256 版）：
+    1. 將所有參數（排除 CheckMacValue）轉成字串
+    2. 以 A–Z 排序（不分大小寫，使用 localeCompare 邏輯）
+    3. 組成：key=value&key2=value2...
+    4. 前後加上：HashKey=${HASH_KEY}& 和 &HashIV=${HASH_IV}
+    5. 對整串使用 encodeURIComponent（完整編碼）
+    6. 再把結果轉成小寫
+    7. 替換指定字元：
+       - %2d → -
+       - %5f → _
+       - %2e → .
+       - %21 → !
+       - %2a → *
+       - %28 → (
+       - %29 → )
+    8. 用 SHA256 hash
+    9. 把結果轉為大寫 hex → 即為 CheckMacValue
     
     Args:
         params: 包含所有參數的字典（不包含 CheckMacValue）
@@ -1074,36 +1085,61 @@ def gen_check_mac_value(params: dict) -> str:
     if not hash_key or not hash_iv:
         raise ValueError("ECPAY_HASH_KEY 或 ECPAY_HASH_IV 為空")
     
-    # 移除 CheckMacValue（如果存在）和 None 值
-    items = [(k, str(v)) for k, v in params.items() if k != "CheckMacValue" and v is not None]
+    # 1. 將所有參數（排除 CheckMacValue）轉成字串，移除 None 和 undefined
+    processed_params: dict[str, str] = {}
+    for k, v in params.items():
+        if k == "CheckMacValue":
+            continue
+        if v is None or v == "":
+            continue
+        processed_params[k] = str(v)
     
-    # 按照參數名稱排序（A-Z）
-    items.sort(key=lambda x: x[0])
+    # 2. 以 A–Z 排序（不分大小寫，使用 localeCompare 邏輯）
+    # Python 的 locale.strcoll 等價於 JavaScript 的 localeCompare
+    import locale
+    try:
+        # 嘗試使用系統 locale
+        sorted_keys = sorted(processed_params.keys(), key=lambda x: locale.strxfrm(x.lower()))
+    except (locale.Error, AttributeError):
+        # 如果 locale 不可用，使用簡單的字母排序（不分大小寫）
+        sorted_keys = sorted(processed_params.keys(), key=lambda x: x.lower())
     
-    # 組合成查詢字串：key1=value1&key2=value2&...
-    query = "&".join([f"{k}={v}" for k, v in items])
+    # 3. 組成：key=value&key2=value2...
+    query = "&".join([f"{k}={processed_params[k]}" for k in sorted_keys])
     
-    # 組合原始字串：HashKey={HashKey}&{查詢字串}&HashIV={HashIV}
+    # 4. 前後加上：HashKey=${HASH_KEY}& 和 &HashIV=${HASH_IV}
     raw = f"HashKey={hash_key}&{query}&HashIV={hash_iv}"
     
-    # URL 編碼並轉小寫，將 %20 替換為 +
+    # 5. 對整串使用 encodeURIComponent（完整編碼）
+    # Python 的 urllib.parse.quote 等價於 JavaScript 的 encodeURIComponent
     import urllib.parse
-    # 根據 ECPay 官方文件，使用 quote 進行 URL 編碼
-    # safe="()!*" 保留這些字元不編碼（根據 ECPay 官方文件）
-    urlencoded = urllib.parse.quote(raw, safe="()!*")
-    # 轉小寫
+    # 不使用 safe 參數，完整編碼所有特殊字元
+    urlencoded = urllib.parse.quote(raw, safe="")
+    
+    # 6. 再把結果轉成小寫
     urlencoded = urlencoded.lower()
-    # 將 %20 替換為 +（空格）
-    urlencoded = urlencoded.replace("%20", "+")
     
-    # SHA256 雜湊並轉大寫
-    signature = hashlib.sha256(urlencoded.encode("utf-8")).hexdigest().upper()
+    # 7. 替換指定字元（按照 ECPay 官方規範）
+    urlencoded = urlencoded.replace("%2d", "-")
+    urlencoded = urlencoded.replace("%5f", "_")
+    urlencoded = urlencoded.replace("%2e", ".")
+    urlencoded = urlencoded.replace("%21", "!")
+    urlencoded = urlencoded.replace("%2a", "*")
+    urlencoded = urlencoded.replace("%28", "(")
+    urlencoded = urlencoded.replace("%29", ")")
     
-    # 記錄調試資訊（僅在開發環境）
+    # 8. 用 SHA256 hash
+    signature = hashlib.sha256(urlencoded.encode("utf-8")).hexdigest()
+    
+    # 9. 把結果轉為大寫 hex
+    signature = signature.upper()
+    
+    # 記錄調試資訊（用於診斷）
     import logging
     logger = logging.getLogger(__name__)
-    logger.debug(f"CheckMacValue 生成: 參數數量={len(items)}, HashKey長度={len(hash_key)}, HashIV長度={len(hash_iv)}")
-    logger.debug(f"CheckMacValue 原始字串長度={len(raw)}, URL編碼後長度={len(urlencoded)}")
+    logger.debug(f"[ECPay CheckMacValue] 參數數量={len(processed_params)}, HashKey長度={len(hash_key)}, HashIV長度={len(hash_iv)}")
+    logger.debug(f"[ECPay CheckMacValue] 原始字串長度={len(raw)}, URL編碼後長度={len(urlencoded)}")
+    logger.debug(f"[ECPay CheckMacValue] 排序後的參數: {sorted_keys}")
     
     return signature
 
@@ -7568,8 +7604,24 @@ def create_app() -> FastAPI:
             
             # 生成簽章
             try:
+                # 記錄發送前的完整參數（隱藏敏感資訊）
+                logger.error(f"[ECPay REQUEST PAYLOAD] 訂單號={trade_no}")
+                logger.error(f"[ECPay REQUEST PAYLOAD] MerchantID={ECPAY_MERCHANT_ID}")
+                logger.error(f"[ECPay REQUEST PAYLOAD] MerchantTradeNo={trade_no}")
+                logger.error(f"[ECPay REQUEST PAYLOAD] MerchantTradeDate={trade_date}")
+                logger.error(f"[ECPay REQUEST PAYLOAD] PaymentType={ecpay_data.get('PaymentType')}")
+                logger.error(f"[ECPay REQUEST PAYLOAD] TotalAmount={ecpay_data.get('TotalAmount')}")
+                logger.error(f"[ECPay REQUEST PAYLOAD] TradeDesc={ecpay_data.get('TradeDesc')}")
+                logger.error(f"[ECPay REQUEST PAYLOAD] ItemName={ecpay_data.get('ItemName')}")
+                logger.error(f"[ECPay REQUEST PAYLOAD] ReturnURL={ecpay_data.get('ReturnURL')}")
+                logger.error(f"[ECPay REQUEST PAYLOAD] OrderResultURL={ecpay_data.get('OrderResultURL')}")
+                logger.error(f"[ECPay REQUEST PAYLOAD] ChoosePayment={ecpay_data.get('ChoosePayment')}")
+                logger.error(f"[ECPay REQUEST PAYLOAD] EncryptType={ecpay_data.get('EncryptType')}")
+                logger.error(f"[ECPay REQUEST PAYLOAD] HashKey長度={len(ECPAY_HASH_KEY) if ECPAY_HASH_KEY else 0}, HashIV長度={len(ECPAY_HASH_IV) if ECPAY_HASH_IV else 0}")
+                
                 ecpay_data["CheckMacValue"] = gen_check_mac_value(ecpay_data)
                 # 使用 ERROR 級別確保在 Zeabur 日誌中可見
+                logger.error(f"[ECPay REQUEST PAYLOAD] CheckMacValue={ecpay_data['CheckMacValue']}")
                 logger.error(f"[ECPay診斷] 簽章生成成功，訂單號={trade_no}, CheckMacValue={ecpay_data['CheckMacValue'][:16]}...")
             except Exception as e:
                 logger.error(f"[ECPay診斷] 簽章生成失敗: {e}", exc_info=True)
@@ -7717,11 +7769,25 @@ def create_app() -> FastAPI:
             form = await request.form()
             params = dict(form.items())
             
+            # 記錄 Webhook 接收到的參數（隱藏敏感資訊）
+            logger.error(f"[ECPay WEBHOOK] 收到 Webhook 通知")
+            logger.error(f"[ECPay WEBHOOK] MerchantID={params.get('MerchantID', '')}")
+            logger.error(f"[ECPay WEBHOOK] MerchantTradeNo={params.get('MerchantTradeNo', '')}")
+            logger.error(f"[ECPay WEBHOOK] TradeNo={params.get('TradeNo', '')}")
+            logger.error(f"[ECPay WEBHOOK] RtnCode={params.get('RtnCode', '')}")
+            logger.error(f"[ECPay WEBHOOK] RtnMsg={params.get('RtnMsg', '')}")
+            logger.error(f"[ECPay WEBHOOK] TradeAmt={params.get('TradeAmt', '')}")
+            logger.error(f"[ECPay WEBHOOK] PaymentDate={params.get('PaymentDate', '')}")
+            logger.error(f"[ECPay WEBHOOK] PaymentType={params.get('PaymentType', '')}")
+            logger.error(f"[ECPay WEBHOOK] CheckMacValue={params.get('CheckMacValue', '')[:16] if params.get('CheckMacValue') else ''}...")
+            
             # 驗證 IP 白名單（完整實作）
             client_ip = request.client.host if request.client else None
             # 獲取真實 IP（考慮反向代理）
             if "x-forwarded-for" in request.headers:
                 client_ip = request.headers["x-forwarded-for"].split(",")[0].strip()
+            
+            logger.error(f"[ECPay WEBHOOK] 來源 IP={client_ip}")
             
             if not is_ecpay_ip(client_ip):
                 logger.warning(f"非 ECPay IP 嘗試訪問 webhook: {client_ip}")
@@ -7731,7 +7797,14 @@ def create_app() -> FastAPI:
             
             # 驗證簽章
             if not verify_ecpay_signature(params):
-                print("ERROR: ECPay Webhook 簽章驗證失敗")
+                logger.error("ERROR: ECPay Webhook 簽章驗證失敗")
+                logger.error(f"[ECPay WEBHOOK] 收到的 CheckMacValue={params.get('CheckMacValue', '')}")
+                # 重新計算 CheckMacValue 以便診斷
+                try:
+                    calculated_mac = gen_check_mac_value(params)
+                    logger.error(f"[ECPay WEBHOOK] 計算的 CheckMacValue={calculated_mac}")
+                except Exception as e:
+                    logger.error(f"[ECPay WEBHOOK] 計算 CheckMacValue 時出錯: {e}")
                 return PlainTextResponse("0|FAIL")
             
             # 獲取訂單資訊
