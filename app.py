@@ -7576,6 +7576,31 @@ def create_app() -> FastAPI:
             # ReturnURL → 後端驗證結果、更新資料庫（/api/payment/return-url）
             # OrderResultURL → 前端顯示付款結果頁面（payment-result.html）
             backend_base_url = os.getenv("BACKEND_BASE_URL", "https://aivideobackend.zeabur.app")
+            
+            # 確保 URL 基礎值完整（不進行任何截斷或 strip）
+            if backend_base_url:
+                backend_base_url = str(backend_base_url).strip()  # 只去除前後空格，不截斷
+            if ECPAY_RETURN_URL:
+                return_url_base = str(ECPAY_RETURN_URL).strip()  # 只去除前後空格，不截斷
+            else:
+                return_url_base = "https://reelmind.aijob.com.tw/payment-result.html"
+            
+            # 構建完整的 URL（確保不截斷）
+            return_url_full = f"{backend_base_url}/api/payment/return-url"
+            order_result_url_full = f"{return_url_base}?order_id={trade_no}"
+            
+            # 立即驗證 URL 完整性
+            logger.error(f"[ECPay URL構建] backend_base_url={backend_base_url} (長度: {len(backend_base_url)})")
+            logger.error(f"[ECPay URL構建] return_url_base={return_url_base} (長度: {len(return_url_base)})")
+            logger.error(f"[ECPay URL構建] ReturnURL完整值={return_url_full} (長度: {len(return_url_full)})")
+            logger.error(f"[ECPay URL構建] OrderResultURL完整值={order_result_url_full} (長度: {len(order_result_url_full)})")
+            
+            # 驗證 URL 格式（確保包含 http:// 或 https://）
+            if not return_url_full.startswith(('http://', 'https://')):
+                logger.error(f"[ECPay錯誤] ReturnURL 格式錯誤！值: {return_url_full}")
+            if not order_result_url_full.startswith(('http://', 'https://')):
+                logger.error(f"[ECPay錯誤] OrderResultURL 格式錯誤！值: {order_result_url_full}")
+            
             ecpay_data = {
                 "MerchantID": ECPAY_MERCHANT_ID,
                 "MerchantTradeNo": trade_no,
@@ -7584,16 +7609,23 @@ def create_app() -> FastAPI:
                 "TotalAmount": int(amount),
                 "TradeDesc": item_name,
                 "ItemName": item_name,
-                "ReturnURL": f"{backend_base_url}/api/payment/return-url",  # 後端 API（伺服器端通知）
-                "OrderResultURL": f"{ECPAY_RETURN_URL}?order_id={trade_no}",  # 前端頁面（用戶返回頁）
+                "ReturnURL": return_url_full,  # 後端 API（伺服器端通知）- 完整 URL，不截斷
+                "OrderResultURL": order_result_url_full,  # 前端頁面（用戶返回頁）- 完整 URL，不截斷
                 "ChoosePayment": "Credit",  # 使用信用卡付款
                 "EncryptType": 1,  # 必須帶，且要算進 CheckMacValue
-                "ClientBackURL": ECPAY_RETURN_URL,  # 取消付款返回頁
+                "ClientBackURL": return_url_base,  # 取消付款返回頁
             }
             
-            # 記錄發送到 ECPay 的參數（隱藏敏感資訊）
-            logger.debug(f"ECPay 參數: MerchantID={ECPAY_MERCHANT_ID}, TradeNo={trade_no}, Amount={amount}, ChoosePayment={ecpay_data.get('ChoosePayment', 'Credit')}")
-            logger.debug(f"ECPay 參數詳情: ReturnURL={ECPAY_NOTIFY_URL}, OrderResultURL={ECPAY_RETURN_URL}")
+            # 驗證 ecpay_data 中的 URL 是否完整
+            if ecpay_data.get('ReturnURL') != return_url_full:
+                logger.error(f"[ECPay錯誤] ReturnURL 在 ecpay_data 中被修改！原始: {return_url_full}, 當前: {ecpay_data.get('ReturnURL')}")
+            if ecpay_data.get('OrderResultURL') != order_result_url_full:
+                logger.error(f"[ECPay錯誤] OrderResultURL 在 ecpay_data 中被修改！原始: {order_result_url_full}, 當前: {ecpay_data.get('OrderResultURL')}")
+            
+            # 記錄發送到 ECPay 的參數（完整記錄，不截斷）
+            logger.error(f"[ECPay參數構建] MerchantID={ECPAY_MERCHANT_ID}, TradeNo={trade_no}, Amount={amount}")
+            logger.error(f"[ECPay參數構建] ReturnURL={ecpay_data.get('ReturnURL')} (長度: {len(ecpay_data.get('ReturnURL', ''))})")
+            logger.error(f"[ECPay參數構建] OrderResultURL={ecpay_data.get('OrderResultURL')} (長度: {len(ecpay_data.get('OrderResultURL', ''))})")
             
             # 生成簽章
             try:
@@ -7622,34 +7654,64 @@ def create_app() -> FastAPI:
                 return HTMLResponse("<html><body><h1>付款系統錯誤，請聯繫客服</h1><p>錯誤詳情已記錄在日誌中</p></body></html>", status_code=500)
             
             # 生成 HTML 表單（自動提交到 ECPay）
-            # 使用 html.escape 確保參數值正確編碼，避免特殊字元導致問題
+            # 安全的表單生成器：確保所有參數完整無截斷
             import html
-            # 記錄所有參數值（用於診斷，隱藏敏感資訊）
-            param_summary = {}
-            for k, v in ecpay_data.items():
-                if k == "CheckMacValue":
-                    param_summary[k] = str(v)[:16] + "..."
-                elif k in ["HashKey", "HashIV"]:
-                    param_summary[k] = "***"  # 不記錄敏感資訊
+            
+            # 生成前完整記錄所有參數（用於診斷）
+            logger.error(f"[ECPay FINAL POST PARAM] 開始生成表單，參數總數={len(ecpay_data)}")
+            for key, value in ecpay_data.items():
+                # 完整記錄每個參數，不截斷
+                if key == "CheckMacValue":
+                    # CheckMacValue 只記錄前32字符（用於診斷）
+                    logger.error(f"[ECPay FINAL POST PARAM] {key} = {str(value)[:32]}... (完整長度: {len(str(value))})")
                 else:
-                    param_summary[k] = str(v)[:50] if len(str(v)) > 50 else str(v)
+                    # 其他參數完整記錄
+                    logger.error(f"[ECPay FINAL POST PARAM] {key} = {str(value)} (長度: {len(str(value))})")
             
-            logger.error(f"[ECPay診斷] 表單參數數量={len(ecpay_data)}, action={ECPAY_API}")
-            logger.error(f"[ECPay診斷] 表單參數摘要: {param_summary}")
+            # 特別檢查 URL 參數的完整性
+            return_url = ecpay_data.get('ReturnURL', '')
+            order_result_url = ecpay_data.get('OrderResultURL', '')
+            logger.error(f"[ECPay URL檢查] ReturnURL完整值: {return_url} (長度: {len(return_url)})")
+            logger.error(f"[ECPay URL檢查] OrderResultURL完整值: {order_result_url} (長度: {len(order_result_url)})")
             
-            # 生成表單 input 欄位
-            # 注意：需要對 HTML 屬性值進行轉義（防止特殊字元破壞 HTML 結構）
-            # 但不要對參數值進行 URL 編碼，讓瀏覽器在提交表單時自動進行 URL 編碼
-            # ECPay 需要接收原始參數值（瀏覽器會自動 URL 編碼）
-            inputs = "\n".join([
-                f'<input type="hidden" name="{html.escape(str(k))}" value="{html.escape(str(v))}"/>' 
-                for k, v in ecpay_data.items()
-            ])
+            # 驗證 URL 完整性（確保沒有被截斷）
+            if return_url and len(return_url) < 10:
+                logger.error(f"[ECPay錯誤] ReturnURL 可能被截斷！當前值: {return_url}")
+            if order_result_url and len(order_result_url) < 10:
+                logger.error(f"[ECPay錯誤] OrderResultURL 可能被截斷！當前值: {order_result_url}")
             
-            # 記錄完整的參數值（用於診斷）
-            logger.error(f"[ECPay診斷] 完整參數值: MerchantID={ecpay_data.get('MerchantID')}, TradeNo={ecpay_data.get('MerchantTradeNo')}, Amount={ecpay_data.get('TotalAmount')}")
-            logger.error(f"[ECPay診斷] ReturnURL={ecpay_data.get('ReturnURL')}")
-            logger.error(f"[ECPay診斷] OrderResultURL={ecpay_data.get('OrderResultURL')}")
+            # 安全的表單生成：逐個生成 input 欄位，確保完整無截斷
+            # 使用 html.escape 轉義 HTML 特殊字符，但保留完整值
+            input_lines = []
+            for key, value in ecpay_data.items():
+                # 確保 key 和 value 都是字符串，且不進行任何截斷
+                key_str = str(key)
+                value_str = str(value)
+                
+                # 使用 html.escape 轉義 HTML 特殊字符（防止 XSS 和 HTML 結構破壞）
+                # 但保留完整的字符串長度
+                escaped_key = html.escape(key_str, quote=True)
+                escaped_value = html.escape(value_str, quote=True)
+                
+                # 生成 input 標籤，確保一行完成，無換行
+                input_line = f'<input type="hidden" name="{escaped_key}" value="{escaped_value}"/>'
+                input_lines.append(input_line)
+                
+                # 驗證生成的 input 是否包含完整值
+                if key_str in ['ReturnURL', 'OrderResultURL']:
+                    if value_str not in input_line:
+                        logger.error(f"[ECPay錯誤] {key_str} 在生成的 HTML 中不完整！原始值: {value_str}, HTML: {input_line[:100]}...")
+            
+            # 將所有 input 欄位連接成字符串（使用換行符分隔，但不影響 HTML 屬性值）
+            inputs = "\n".join(input_lines)
+            
+            # 最終驗證：檢查生成的 HTML 中是否包含完整的 URL
+            if return_url and return_url not in inputs:
+                logger.error(f"[ECPay錯誤] ReturnURL 在最終 HTML 中缺失！原始值: {return_url}")
+            if order_result_url and order_result_url not in inputs:
+                logger.error(f"[ECPay錯誤] OrderResultURL 在最終 HTML 中缺失！原始值: {order_result_url}")
+            
+            logger.error(f"[ECPay診斷] 表單生成完成，input 欄位數量={len(input_lines)}, HTML 總長度={len(inputs)}")
             html = f'''<!DOCTYPE html>
 <html>
 <head>
