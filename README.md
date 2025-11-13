@@ -125,14 +125,18 @@ LLM_KEY_ENCRYPTION_KEY=your_32byte_base64_key  # BYOK 加密金鑰
 ### 🟡 建議設定（功能增強）
 
 ```bash
-# ECPay 金流設定
+# ECPay 金流設定（生產環境）
+ECPAY_MODE=prod  # 或 dev（測試環境）
 ECPAY_MERCHANT_ID=your_merchant_id
-ECPAY_HASH_KEY=your_hash_key
-ECPAY_HASH_IV=your_hash_iv
-ECPAY_API=https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5  # 測試環境
-# ECPAY_API=https://payment.ecpay.com.tw/Cashier/AioCheckOut/V5      # 生產環境
-ECPAY_RETURN_URL=https://your-frontend.com/subscription.html
+ECPAY_HASH_KEY=your_hash_key  # ⚠️ 注意：確認沒有前後空格
+ECPAY_HASH_IV=your_hash_iv   # ⚠️ 注意：確認沒有前後空格，注意容易混淆的字元（0 vs O, 1 vs l）
+ECPAY_API=https://payment.ecpay.com.tw/Cashier/AioCheckOut/V5  # 生產環境
+# ECPAY_API=https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5  # 測試環境
+ECPAY_RETURN_URL=https://your-frontend.com/payment-result.html
 ECPAY_NOTIFY_URL=https://your-backend.com/api/payment/webhook
+BACKEND_BASE_URL=https://your-backend.com  # 用於構建 ReturnURL
+CLIENT_BACK_URL=https://your-frontend.com/payment-result.html  # 取消付款返回頁
+ECPAY_IP_WHITELIST=210.200.4.0/24,210.200.5.0/24  # ECPay 伺服器 IP 白名單
 
 # Email 設定（自動續費通知）
 SMTP_ENABLED=true
@@ -141,6 +145,10 @@ SMTP_PORT=587
 SMTP_USER=your_email@example.com
 SMTP_PASSWORD=your_password
 CONTACT_EMAIL=your_email@example.com
+
+# 連結授權設定（PPA/n8n 通路）
+WEBHOOK_SECRET=your_webhook_secret_key  # ⚠️ 必須設定，用於驗證 PPA/n8n 請求
+FRONTEND_URL=https://your-frontend.com  # 用於生成授權連結
 
 # 定時任務安全密鑰（可選）
 CRON_SECRET=your_cron_secret
@@ -194,11 +202,19 @@ ReelMindbackend-main/
 
 ### 訂閱與付款
 
-- `POST /api/payment/checkout` - 建立訂單並返回付款表單
-- `POST /api/payment/webhook` - ECPay 伺服器端通知
-- `GET /api/payment/return` - 用戶返回頁
+- `POST /api/payment/checkout` - 建立訂單並返回付款表單（需登入）
+- `POST /api/payment/create-order` - 建立訂單（新端點，與 checkout 相同）
+- `POST /api/payment/webhook` - ECPay 伺服器端通知（自動啟用授權）
+- `POST /api/payment/return-url` - ECPay ReturnURL（後端 API）
+- `GET /api/payment/return` - 用戶返回頁（前端重定向）
+- `GET /api/payment/test-checkmac` - 測試 CheckMacValue 生成（診斷用）
 - `GET /api/user/subscription` - 獲取訂閱狀態
 - `PUT /api/user/subscription/auto-renew` - 更新自動續費狀態
+
+### 連結授權（PPA/n8n 通路）
+
+- `POST /api/webhook/verify-license` - 接收 PPA/n8n 授權通知，生成授權連結
+- `GET /api/user/license/verify` - 驗證授權連結並啟用訂閱（用戶點擊連結時）
 
 ### 自動續費
 
@@ -278,6 +294,13 @@ FRONTEND_BASE_URL=https://your-frontend.zeabur.app
 
 ## 📝 重要更新記錄
 
+### 2025-11-13 - ECPay 付款流程完善與日誌優化
+
+- ✅ CheckMacValue 生成邏輯完善（UTF-8 編碼處理、URL 編碼驗證）
+- ✅ 日誌級別優化（成功訊息使用 INFO，錯誤訊息使用 ERROR）
+- ✅ Webhook 授權流程完善（付款成功後自動啟用用戶授權）
+- ✅ 環境變數驗證與錯誤處理增強
+
 ### 2025-11-11 - 訂閱付款流程優化與自動續費功能
 
 - ✅ 強制登入才能訂閱付款
@@ -295,14 +318,48 @@ FRONTEND_BASE_URL=https://your-frontend.zeabur.app
 
 詳細記錄請參考 `專案更新日誌.md`。
 
+## 💳 付款與授權流程
+
+### 完整流程說明
+
+1. **用戶發起付款**
+   - 用戶在前端選擇方案（月費/年費）
+   - 前端調用 `POST /api/payment/checkout`（需登入）
+   - 後端生成訂單並返回 ECPay 付款表單
+
+2. **ECPay 付款**
+   - 用戶在 ECPay 頁面完成付款
+   - ECPay 驗證 CheckMacValue 簽章
+
+3. **Webhook 通知（自動授權）**
+   - ECPay 發送 Webhook 到 `/api/payment/webhook`
+   - 後端驗證簽章和 IP 白名單
+   - **付款成功時自動執行**：
+     - 更新 `orders` 表狀態為 `paid`
+     - 在 `licenses` 表建立/更新授權記錄（`status='active'`）
+     - 更新 `user_auth` 表的 `is_subscribed=1`
+     - 計算到期日（月費 30 天，年費 365 天）
+
+4. **用戶查詢授權狀態**
+   - 調用 `GET /api/user/subscription`
+   - 返回 `is_subscribed`、`tier`、`expires_at` 等資訊
+
+### 測試授權流程
+
+- **ECPay 付款授權**：詳細測試步驟請參考 `ECPay付款授權測試指南.md`
+- **連結授權（PPA/n8n）**：詳細測試步驟請參考 `連結授權測試指南.md`
+
 ## 📚 相關文件
 
 - `2025-11-11更新日誌.md` - 最新更新記錄
 - `專案更新日誌.md` - 完整更新歷史
+- `ECPay後端檢查報告_綠界客服建議.md` - CheckMacValue 檢查報告
 - `ECPay金流配置指南.md` - ECPay 設定說明
 - `ECPay_Webhook設定指南.md` - Webhook 設定步驟
 - `ECPay付款流程測試指南.md` - 測試環境設定
 - `ECPay付款錯誤排查指南.md` - 常見錯誤解決
+- `ECPay付款授權測試指南.md` - ECPay 付款授權流程測試步驟
+- `連結授權測試指南.md` - PPA/n8n 連結授權流程測試步驟
 - `ECPay自動續費方案說明.md` - 自動續費方案比較
 - `自動續費定時任務設定指南.md` - 定時任務設定
 - `MD檔案整理報告.md` - 文件整理說明
@@ -351,4 +408,4 @@ A: 參考 `ECPay付款錯誤排查指南.md`，檢查：
 
 ---
 
-**最後更新**：2025-11-11
+**最後更新**：2025-11-13
