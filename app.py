@@ -1084,11 +1084,25 @@ def gen_check_mac_value(params: dict) -> str:
         raise ValueError("ECPAY_HASH_KEY 或 ECPAY_HASH_IV 為空")
     
     # 0) 先轉成字串並移除 None，避免型別問題
+    # 確保所有值都是 UTF-8 編碼的字串（符合綠界 UTF-8 編碼要求）
     processed_params: dict[str, str] = {}
     for k, v in params.items():
         if v is None:
             continue
-        processed_params[k] = str(v)
+        # 確保值正確處理為 UTF-8 編碼的字串
+        if isinstance(v, bytes):
+            # 如果是 bytes，解碼為 UTF-8
+            processed_params[k] = v.decode('utf-8')
+        else:
+            # 確保字串是 UTF-8 編碼（Python 3 預設就是 UTF-8，但明確處理更安全）
+            str_value = str(v)
+            # 檢查是否包含非 ASCII 字元，確保正確編碼
+            try:
+                str_value.encode('utf-8')
+            except UnicodeEncodeError:
+                # 如果編碼失敗，嘗試使用錯誤處理
+                str_value = str_value.encode('utf-8', errors='ignore').decode('utf-8')
+            processed_params[k] = str_value
     
     # 1) 移除 CheckMacValue 自己（保險）
     processed_params.pop("CheckMacValue", None)
@@ -1122,12 +1136,19 @@ def gen_check_mac_value(params: dict) -> str:
     # 7) SHA256 雜湊並轉成大寫十六進位
     mac = hashlib.sha256(encoded.encode("utf-8")).hexdigest().upper()
     
-    # 記錄調試資訊（用於診斷）
+    # 記錄調試資訊（用於診斷）- 增強日誌以符合綠界客服建議
     import logging
     logger = logging.getLogger(__name__)
     logger.debug(f"[ECPay CheckMacValue] 參數數量={len(processed_params)}, HashKey長度={len(hash_key)}, HashIV長度={len(hash_iv)}")
     logger.debug(f"[ECPay CheckMacValue] 原始字串長度={len(raw)}, URL編碼後長度={len(encoded)}")
     logger.debug(f"[ECPay CheckMacValue] 排序後的參數: {[k for k, v in sorted_items]}")
+    # 添加詳細的編碼資訊（用於診斷 UTF-8 編碼問題）
+    logger.debug(f"[ECPay CheckMacValue] 原始參數字串（前100字符）: {raw[:100]}")
+    logger.debug(f"[ECPay CheckMacValue] URL編碼後字串（前100字符）: {encoded[:100]}")
+    # 檢查是否有非 ASCII 字元
+    has_non_ascii = any(ord(c) > 127 for c in raw)
+    if has_non_ascii:
+        logger.warning(f"[ECPay CheckMacValue] 警告：參數字串包含非 ASCII 字元，請確認 UTF-8 編碼正確")
     
     return mac
 
