@@ -7613,7 +7613,7 @@ def create_app() -> FastAPI:
                 "OrderResultURL": order_result_url_full,  # 前端頁面（用戶返回頁）- 完整 URL，不截斷
                 "ChoosePayment": "Credit",  # 使用信用卡付款
                 "EncryptType": 1,  # 必須帶，且要算進 CheckMacValue
-                # 不要有 ClientBackURL
+                "ClientBackURL": CLIENT_BACK_URL       # 👉 一定要放這
             }
             
             # 驗證 ecpay_data 中的 URL 是否完整
@@ -7630,20 +7630,21 @@ def create_app() -> FastAPI:
             # 生成簽章
             try:
                 # 記錄發送前的完整參數（隱藏敏感資訊）
-                logger.error(f"[ECPay REQUEST PAYLOAD] 訂單號={trade_no}")
-                logger.error(f"[ECPay REQUEST PAYLOAD] MerchantID={ECPAY_MERCHANT_ID}")
-                logger.error(f"[ECPay REQUEST PAYLOAD] MerchantTradeNo={trade_no}")
-                logger.error(f"[ECPay REQUEST PAYLOAD] MerchantTradeDate={trade_date}")
-                logger.error(f"[ECPay REQUEST PAYLOAD] PaymentType={ecpay_data.get('PaymentType')}")
-                logger.error(f"[ECPay REQUEST PAYLOAD] TotalAmount={ecpay_data.get('TotalAmount')}")
-                logger.error(f"[ECPay REQUEST PAYLOAD] TradeDesc={ecpay_data.get('TradeDesc')}")
-                logger.error(f"[ECPay REQUEST PAYLOAD] ItemName={ecpay_data.get('ItemName')}")
-                logger.error(f"[ECPay REQUEST PAYLOAD] ReturnURL={ecpay_data.get('ReturnURL')}")
-                logger.error(f"[ECPay REQUEST PAYLOAD] OrderResultURL={ecpay_data.get('OrderResultURL')}")
-                logger.error(f"[ECPay REQUEST PAYLOAD] ChoosePayment={ecpay_data.get('ChoosePayment')}")
-                logger.error(f"[ECPay REQUEST PAYLOAD] EncryptType={ecpay_data.get('EncryptType')}")
-                logger.error(f"[ECPay REQUEST PAYLOAD] HashKey長度={len(ECPAY_HASH_KEY) if ECPAY_HASH_KEY else 0}, HashIV長度={len(ECPAY_HASH_IV) if ECPAY_HASH_IV else 0}")
-                
+                logger.info(f"[ECPay REQUEST PAYLOAD] 訂單號={trade_no}")
+                logger.info(f"[ECPay REQUEST PAYLOAD] MerchantID={ECPAY_MERCHANT_ID}")
+                logger.info(f"[ECPay REQUEST PAYLOAD] MerchantTradeNo={trade_no}")
+                logger.info(f"[ECPay REQUEST PAYLOAD] MerchantTradeDate={trade_date}")
+                logger.info(f"[ECPay REQUEST PAYLOAD] PaymentType={ecpay_data.get('PaymentType')}")
+                logger.info(f"[ECPay REQUEST PAYLOAD] TotalAmount={ecpay_data.get('TotalAmount')}")
+                logger.info(f"[ECPay REQUEST PAYLOAD] TradeDesc={ecpay_data.get('TradeDesc')}")
+                logger.info(f"[ECPay REQUEST PAYLOAD] ItemName={ecpay_data.get('ItemName')}")
+                logger.info(f"[ECPay REQUEST PAYLOAD] ReturnURL={ecpay_data.get('ReturnURL')}")
+                logger.info(f"[ECPay REQUEST PAYLOAD] OrderResultURL={ecpay_data.get('OrderResultURL')}")
+                logger.info(f"[ECPay REQUEST PAYLOAD] ChoosePayment={ecpay_data.get('ChoosePayment')}")
+                logger.info(f"[ECPay REQUEST PAYLOAD] EncryptType={ecpay_data.get('EncryptType')}")
+                logger.info(f"[ECPay REQUEST PAYLOAD] HashKey長度={len(ECPAY_HASH_KEY) if ECPAY_HASH_KEY else 0}, HashIV長度={len(ECPAY_HASH_IV) if ECPAY_HASH_IV else 0}")
+
+                ecpay_data["ClientBackURL"] = CLIENT_BACK_URL
                 ecpay_data["CheckMacValue"] = gen_check_mac_value(ecpay_data)
                 # 使用 ERROR 級別確保在 Zeabur 日誌中可見
                 logger.error(f"[ECPay REQUEST PAYLOAD] CheckMacValue={ecpay_data['CheckMacValue']}")
