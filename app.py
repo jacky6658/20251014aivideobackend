@@ -330,12 +330,24 @@ print(f"DEBUG: FRONTEND_BASE_URL: {FRONTEND_BASE_URL}")
 # JWT 密鑰（用於生成訪問令牌）
 JWT_SECRET = os.getenv("JWT_SECRET", secrets.token_urlsafe(32))
 
-# ECPay 金流配置
-ECPAY_MERCHANT_ID = os.getenv("ECPAY_MERCHANT_ID")
-ECPAY_HASH_KEY = os.getenv("ECPAY_HASH_KEY")
-ECPAY_HASH_IV = os.getenv("ECPAY_HASH_IV")
-ECPAY_API = os.getenv("ECPAY_API", "https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5")  # 預設測試環境
-ECPAY_RETURN_URL = os.getenv("ECPAY_RETURN_URL", "https://aivideonew.zeabur.app/subscription.html")
+# ECPay 金流配置 - 支援環境切換機制
+ECPAY_MODE = os.getenv("ECPAY_MODE", "prod").lower()  # dev 或 prod
+
+# 根據 ECPAY_MODE 自動切換環境
+if ECPAY_MODE == "dev":
+    # 測試環境（固定值）
+    ECPAY_MERCHANT_ID = os.getenv("ECPAY_MERCHANT_ID", "2000132")
+    ECPAY_HASH_KEY = os.getenv("ECPAY_HASH_KEY", "pwFHCqoQZGmho4w6")
+    ECPAY_HASH_IV = os.getenv("ECPAY_HASH_IV", "EkRm7iFT261dpevs")
+    ECPAY_API = os.getenv("ECPAY_API", "https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5")
+else:
+    # 正式環境（從環境變數讀取）
+    ECPAY_MERCHANT_ID = os.getenv("ECPAY_MERCHANT_ID", "3233958")
+    ECPAY_HASH_KEY = os.getenv("ECPAY_HASH_KEY", "ghNKWPWvw8M2xy9O")
+    ECPAY_HASH_IV = os.getenv("ECPAY_HASH_IV", "vs8lq0aJZ495mWTv")
+    ECPAY_API = os.getenv("ECPAY_API", "https://payment.ecpay.com.tw/Cashier/AioCheckOut/V5")
+
+ECPAY_RETURN_URL = os.getenv("ECPAY_RETURN_URL", "https://reelmind.aijob.com.tw/payment-result.html")
 ECPAY_NOTIFY_URL = os.getenv("ECPAY_NOTIFY_URL", "https://aivideobackend.zeabur.app/api/payment/webhook")
 
 # ECPay IP 白名單（從環境變數讀取，支援多個 IP 範圍，用逗號分隔）
@@ -7416,10 +7428,15 @@ def create_app() -> FastAPI:
                 "env_status": env_status if 'env_status' in locals() else {}
             }
     
-    @app.post("/api/payment/checkout", response_class=HTMLResponse)
+    @app.post("/api/payment/create-order", response_class=HTMLResponse)
+    @app.post("/api/payment/checkout", response_class=HTMLResponse)  # 保留舊端點以向後兼容
     @rate_limit("10/minute")  # 添加 Rate Limiting
     async def create_payment_order(request: Request, current_user_id: Optional[str] = Depends(get_current_user)):
         """建立 ECPay 付款訂單並返回付款表單
+        
+        支援兩個端點：
+        - POST /api/payment/create-order（新端點，符合規格）
+        - POST /api/payment/checkout（舊端點，向後兼容）
         
         請求參數：
         - plan: 'monthly' | 'yearly'
@@ -7555,6 +7572,10 @@ def create_app() -> FastAPI:
             if ECPAY_HASH_KEY != ECPAY_HASH_KEY.strip() or ECPAY_HASH_IV != ECPAY_HASH_IV.strip():
                 logger.warning(f"ECPay HashKey 或 HashIV 包含前後空格，已自動去除")
             
+            # 根據規格：ReturnURL 是後端 API，OrderResultURL 是前端頁面
+            # ReturnURL → 後端驗證結果、更新資料庫（/api/payment/return-url）
+            # OrderResultURL → 前端顯示付款結果頁面（payment-result.html）
+            backend_base_url = os.getenv("BACKEND_BASE_URL", "https://aivideobackend.zeabur.app")
             ecpay_data = {
                 "MerchantID": ECPAY_MERCHANT_ID,
                 "MerchantTradeNo": trade_no,
@@ -7563,13 +7584,10 @@ def create_app() -> FastAPI:
                 "TotalAmount": int(amount),
                 "TradeDesc": item_name,
                 "ItemName": item_name,
-                "ReturnURL": ECPAY_NOTIFY_URL,  # 伺服器端通知
-                "OrderResultURL": f"{ECPAY_RETURN_URL}?order_id={trade_no}",  # 用戶返回頁
-                "ChoosePayment": "Credit",  # 使用信用卡付款（如果 ALL 沒有權限，請改為 Credit）
-                # 如果需要支援多種付款方式，可以改為：
-                # "ChoosePayment": "Credit,ATM,CVS",  # 指定多種付款方式
-                # "ChoosePayment": "ALL",  # 讓用戶自行選擇付款方式（需要所有付款方式都已開通）
-                "EncryptType": 1,
+                "ReturnURL": f"{backend_base_url}/api/payment/return-url",  # 後端 API（伺服器端通知）
+                "OrderResultURL": f"{ECPAY_RETURN_URL}?order_id={trade_no}",  # 前端頁面（用戶返回頁）
+                "ChoosePayment": "Credit",  # 使用信用卡付款
+                "EncryptType": 1,  # 必須帶，且要算進 CheckMacValue
                 "ClientBackURL": ECPAY_RETURN_URL,  # 取消付款返回頁
             }
             
@@ -8062,9 +8080,156 @@ def create_app() -> FastAPI:
             print(f"ERROR: ECPay Webhook 處理失敗: {e}")
             return PlainTextResponse("0|FAIL")
     
+    @app.post("/api/payment/return-url", response_class=PlainTextResponse)
+    async def ecpay_return_url(request: Request):
+        """ECPay ReturnURL（後端 API）- 伺服器端通知
+        
+        這是 ECPay 的 ReturnURL，用於後端驗證結果、更新資料庫。
+        必須驗證簽章，更新訂單狀態，然後返回 "1|OK" 或 "0|FAIL"。
+        
+        注意：這是後端 API，不是前端 HTML。
+        """
+        try:
+            # 獲取表單數據（ECPay 使用 POST form-urlencoded）
+            form = await request.form()
+            params = dict(form.items())
+            
+            # 記錄 ReturnURL 接收到的參數
+            logger.info(f"[ECPay RETURN-URL] 收到 ReturnURL 通知")
+            logger.info(f"[ECPay RETURN-URL] MerchantID={params.get('MerchantID', '')}")
+            logger.info(f"[ECPay RETURN-URL] MerchantTradeNo={params.get('MerchantTradeNo', '')}")
+            logger.info(f"[ECPay RETURN-URL] TradeNo={params.get('TradeNo', '')}")
+            logger.info(f"[ECPay RETURN-URL] RtnCode={params.get('RtnCode', '')}")
+            logger.info(f"[ECPay RETURN-URL] RtnMsg={params.get('RtnMsg', '')}")
+            
+            # 驗證 IP 白名單（可選，但建議）
+            client_ip = request.client.host if request.client else None
+            if "x-forwarded-for" in request.headers:
+                client_ip = request.headers["x-forwarded-for"].split(",")[0].strip()
+            logger.info(f"[ECPay RETURN-URL] 來源 IP={client_ip}")
+            
+            # 驗證簽章
+            if not verify_ecpay_signature(params):
+                logger.error("ERROR: ECPay ReturnURL 簽章驗證失敗")
+                logger.error(f"[ECPay RETURN-URL] 收到的 CheckMacValue={params.get('CheckMacValue', '')}")
+                try:
+                    calculated_mac = gen_check_mac_value(params)
+                    logger.error(f"[ECPay RETURN-URL] 計算的 CheckMacValue={calculated_mac}")
+                except Exception as e:
+                    logger.error(f"[ECPay RETURN-URL] 計算 CheckMacValue 時出錯: {e}")
+                return PlainTextResponse("0|FAIL")
+            
+            # 獲取訂單資訊
+            merchant_trade_no = params.get("MerchantTradeNo", "")
+            trade_no = params.get("TradeNo", "")
+            rtn_code = params.get("RtnCode", "")
+            payment_date = params.get("PaymentDate", "")
+            trade_amt = params.get("TradeAmt", "")
+            payment_type = params.get("PaymentType", "")
+            
+            # 儲存原始回呼內容（用於稽核）
+            raw_payload_json = json.dumps(params, ensure_ascii=False)
+            
+            # 更新訂單狀態
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            try:
+                # 查詢訂單
+                if use_postgresql:
+                    cursor.execute(
+                        "SELECT user_id, plan_type, amount, payment_status, trade_no FROM orders WHERE order_id = %s",
+                        (merchant_trade_no,)
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT user_id, plan_type, amount, payment_status, trade_no FROM orders WHERE order_id = ?",
+                        (merchant_trade_no,)
+                    )
+                
+                order = cursor.fetchone()
+                
+                if not order:
+                    logger.warning(f"[ECPay RETURN-URL] 找不到訂單: {merchant_trade_no}")
+                    return PlainTextResponse("1|OK")  # 仍然返回 OK，避免重複通知
+                
+                user_id, plan_type, amount, current_status, existing_trade_no = order
+                
+                # 冪等處理：檢查是否已經處理過
+                if existing_trade_no and existing_trade_no == trade_no and current_status == "paid":
+                    logger.info(f"[ECPay RETURN-URL] 訂單已處理過: {merchant_trade_no}, trade_no: {trade_no}")
+                    return PlainTextResponse("1|OK")
+                
+                # 檢查付款狀態
+                if str(rtn_code) != "1":
+                    logger.warning(f"[ECPay RETURN-URL] 付款失敗，訂單號: {merchant_trade_no}, RtnCode: {rtn_code}, RtnMsg: {params.get('RtnMsg', '')}")
+                    # 更新訂單狀態為 failed
+                    if use_postgresql:
+                        cursor.execute("""
+                            UPDATE orders 
+                            SET payment_status = %s, 
+                                raw_payload = %s,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE order_id = %s
+                        """, ("failed", raw_payload_json, merchant_trade_no))
+                    else:
+                        cursor.execute("""
+                            UPDATE orders 
+                            SET payment_status = ?, 
+                                raw_payload = ?,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE order_id = ?
+                        """, ("failed", raw_payload_json, merchant_trade_no))
+                    
+                    conn.commit()
+                    logger.info(f"[ECPay RETURN-URL] 已將訂單 {merchant_trade_no} 標記為失敗")
+                    return PlainTextResponse("1|OK")  # 仍然返回 OK，避免重複通知
+                
+                # 付款成功，更新訂單狀態
+                if use_postgresql:
+                    cursor.execute("""
+                        UPDATE orders 
+                        SET payment_status = %s,
+                            trade_no = %s,
+                            payment_date = %s,
+                            raw_payload = %s,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE order_id = %s
+                    """, ("paid", trade_no, payment_date or None, raw_payload_json, merchant_trade_no))
+                else:
+                    cursor.execute("""
+                        UPDATE orders 
+                        SET payment_status = ?,
+                            trade_no = ?,
+                            payment_date = ?,
+                            raw_payload = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE order_id = ?
+                    """, ("paid", trade_no, payment_date or None, raw_payload_json, merchant_trade_no))
+                
+                conn.commit()
+                logger.info(f"[ECPay RETURN-URL] 訂單 {merchant_trade_no} 已更新為已付款")
+                
+            except Exception as e:
+                logger.error(f"[ECPay RETURN-URL] 更新訂單狀態失敗: {e}", exc_info=True)
+                conn.rollback()
+                return PlainTextResponse("0|FAIL")
+            finally:
+                cursor.close()
+                conn.close()
+            
+            return PlainTextResponse("1|OK")
+        
+        except Exception as e:
+            logger.error(f"[ECPay RETURN-URL] 處理失敗: {e}", exc_info=True)
+            return PlainTextResponse("0|FAIL")
+    
     @app.get("/api/payment/return")
     async def ecpay_return(request: Request):
-        """ECPay 用戶返回頁（用戶瀏覽器返回）
+        """ECPay 用戶返回頁（用戶瀏覽器返回）- OrderResultURL
         
         用戶完成付款後，ECPay 會 redirect 到這個頁面。
         驗證簽章後，redirect 到前端結果頁。
@@ -8075,7 +8240,7 @@ def create_app() -> FastAPI:
             
             # 驗證簽章
             if not verify_ecpay_signature(params):
-                print("ERROR: ECPay Return 簽章驗證失敗")
+                logger.error("ERROR: ECPay Return 簽章驗證失敗")
                 return RedirectResponse(
                     url=f"{ECPAY_RETURN_URL}?status=error&message=簽章驗證失敗",
                     status_code=302
@@ -8138,7 +8303,7 @@ def create_app() -> FastAPI:
                 )
         
         except Exception as e:
-            print(f"ERROR: ECPay Return 處理失敗: {e}")
+            logger.error(f"ERROR: ECPay Return 處理失敗: {e}")
             return RedirectResponse(
                 url=f"{ECPAY_RETURN_URL}?status=error&message=處理失敗",
                 status_code=302
