@@ -349,6 +349,7 @@ else:
 
 ECPAY_RETURN_URL = os.getenv("ECPAY_RETURN_URL", "https://reelmind.aijob.com.tw/payment-result.html")
 ECPAY_NOTIFY_URL = os.getenv("ECPAY_NOTIFY_URL", "https://aivideobackend.zeabur.app/api/payment/webhook")
+CLIENT_BACK_URL = os.getenv("CLIENT_BACK_URL", "https://reelmind.aijob.com.tw/payment-result.html")  # 取消付款返回頁，必須與提供給綠界的網址一致
 
 # ECPay IP 白名單（從環境變數讀取，支援多個 IP 範圍，用逗號分隔）
 ECPAY_IP_WHITELIST_STR = os.getenv("ECPAY_IP_WHITELIST", "210.200.4.0/24,210.200.5.0/24")
@@ -3255,7 +3256,16 @@ def create_app() -> FastAPI:
                     except Exception:
                         continue
             except Exception as e:
-                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                error_msg = str(e)
+                # 檢查是否為 429 配額錯誤
+                is_quota_error = '429' in error_msg or 'quota' in error_msg.lower() or 'exceeded' in error_msg.lower()
+                
+                if is_quota_error:
+                    logger.error(f"[Gemini API 配額錯誤] 用戶ID: {user_id}, 錯誤訊息: {error_msg}")
+                else:
+                    logger.error(f"[Gemini API 錯誤] 用戶ID: {user_id}, 錯誤訊息: {error_msg}", exc_info=True)
+                
+                yield f"data: {json.dumps({'type': 'error', 'message': error_msg})}\n\n"
             finally:
                 # === 保存記憶 ===
                 if user_id and ai_response:
@@ -3562,16 +3572,37 @@ def create_app() -> FastAPI:
             )
     
     @app.get("/api/user/memory/full/{user_id}")
-    async def get_full_memory(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
-        """獲取用戶的完整記憶（STM + LTM）"""
+    async def get_full_memory(
+        user_id: str, 
+        conversation_type: Optional[str] = None,
+        current_user_id: Optional[str] = Depends(get_current_user)
+    ):
+        """獲取用戶的完整記憶（STM + LTM）
+        
+        Args:
+            user_id: 用戶ID
+            conversation_type: 對話類型（可選），例如 'ip_planning', 'ai_advisor'
+                              如果指定，只返回該類型的記憶
+        """
         if not current_user_id or current_user_id != user_id:
             return JSONResponse({"error": "無權限訪問此用戶資料"}, status_code=403)
         try:
-            # STM
+            # STM - 根據 conversation_type 過濾
             stm_data = stm.load_memory(user_id)
+            if conversation_type and stm_data.get("recent_turns"):
+                # 過濾 STM 中的 recent_turns，只保留指定類型的對話
+                filtered_turns = [
+                    turn for turn in stm_data.get("recent_turns", [])
+                    if turn.get("metadata", {}).get("conversation_type") == conversation_type
+                ]
+                stm_data = {
+                    **stm_data,
+                    "recent_turns": filtered_turns,
+                    "recent_turns_count": len(filtered_turns)
+                }
             
-            # LTM
-            ltm_data = get_user_memory(user_id)
+            # LTM - 根據 conversation_type 過濾
+            ltm_data = get_user_memory(user_id, conversation_type)
             
             # 格式化顯示
             memory_summary = format_memory_for_display({
@@ -3581,6 +3612,7 @@ def create_app() -> FastAPI:
             
             return {
                 "user_id": user_id,
+                "conversation_type": conversation_type,
                 "stm": {
                     "recent_turns_count": len(stm_data.get("recent_turns", [])),
                     "has_summary": bool(stm_data.get("last_summary")),
@@ -3913,6 +3945,58 @@ def create_app() -> FastAPI:
             }
         except Exception as e:
             return JSONResponse({"error": f"儲存失敗: {str(e)}"}, status_code=500)
+    
+    @app.delete("/api/ip-planning/results/{result_id}")
+    async def delete_ip_planning_result(result_id: int, current_user_id: Optional[str] = Depends(get_current_user)):
+        """刪除 IP 人設規劃結果"""
+        if not current_user_id:
+            return JSONResponse({"error": "請先登入"}, status_code=401)
+        
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 先檢查記錄是否存在且屬於當前用戶
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT id, user_id FROM ip_planning_results
+                    WHERE id = %s
+                """, (result_id,))
+            else:
+                cursor.execute("""
+                    SELECT id, user_id FROM ip_planning_results
+                    WHERE id = ?
+                """, (result_id,))
+            
+            record = cursor.fetchone()
+            if not record:
+                return JSONResponse({"error": "記錄不存在"}, status_code=404)
+            
+            if record[1] != current_user_id:
+                return JSONResponse({"error": "無權限刪除此記錄"}, status_code=403)
+            
+            # 刪除記錄
+            if use_postgresql:
+                cursor.execute("""
+                    DELETE FROM ip_planning_results
+                    WHERE id = %s AND user_id = %s
+                """, (result_id, current_user_id))
+            else:
+                cursor.execute("""
+                    DELETE FROM ip_planning_results
+                    WHERE id = ? AND user_id = ?
+                """, (result_id, current_user_id))
+            
+            conn.commit()
+            conn.close()
+            
+            return {"message": "記錄已刪除", "result_id": result_id}
+        except Exception as e:
+            logger.error(f"刪除 IP 人設規劃結果失敗: {e}", exc_info=True)
+            return JSONResponse({"error": f"刪除失敗: {str(e)}"}, status_code=500)
     
     @app.get("/api/ip-planning/my")
     async def get_my_ip_planning_results(current_user_id: Optional[str] = Depends(get_current_user), result_type: Optional[str] = None):
@@ -5429,24 +5513,24 @@ def create_app() -> FastAPI:
             
             # 計算各模式統計
             mode_stats = {
-                "mode1_quick_generate": {"count": 0, "completion_rate": 0},
+                "mode1_ip_planning": {"count": 0, "profiles_generated": 0},
                 "mode2_ai_consultant": {"count": 0, "avg_turns": 0},
-                "mode3_ip_planning": {"count": 0, "profiles_generated": 0}
+                "mode3_quick_generate": {"count": 0, "completion_rate": 0}
             }
             
             # 根據對話類型分類
             for conv_type, count in conversations:
-                if conv_type == "account_positioning":
-                    mode_stats["mode1_quick_generate"]["count"] = count
+                if conv_type == "ip_planning":
+                    mode_stats["mode1_ip_planning"]["count"] += count
                 elif conv_type in ["topic_selection", "script_generation"]:
-                    mode_stats["mode2_ai_consultant"]["count"] += count
+                    mode_stats["mode3_quick_generate"]["count"] += count
+                elif conv_type == "account_positioning":
+                    mode_stats["mode3_quick_generate"]["count"] += count
                 elif conv_type == "general_consultation":
                     mode_stats["mode2_ai_consultant"]["count"] += count
-                elif conv_type == "ip_planning":
-                    mode_stats["mode3_ip_planning"]["count"] += count
             
-            # 計算 Mode1 完成率：有進行帳號定位對話且有保存腳本的用戶比例
-            if mode_stats["mode1_quick_generate"]["count"] > 0:
+            # 計算 Mode3（一鍵生成）完成率：有進行帳號定位對話且有保存腳本的用戶比例
+            if mode_stats["mode3_quick_generate"]["count"] > 0:
                 # 獲取進行過帳號定位對話的用戶數
                 cursor.execute("""
                     SELECT COUNT(DISTINCT user_id) as user_count
@@ -5470,11 +5554,11 @@ def create_app() -> FastAPI:
                 # 計算完成率
                 if total_users > 0:
                     completion_rate = round((completion_count / total_users) * 100, 1)
-                    mode_stats["mode1_quick_generate"]["completion_rate"] = completion_rate
+                    mode_stats["mode3_quick_generate"]["completion_rate"] = completion_rate
                 else:
-                    mode_stats["mode1_quick_generate"]["completion_rate"] = 0
+                    mode_stats["mode3_quick_generate"]["completion_rate"] = 0
             else:
-                mode_stats["mode1_quick_generate"]["completion_rate"] = 0
+                mode_stats["mode3_quick_generate"]["completion_rate"] = 0
             
             # 從長期記憶表統計 IP 人設規劃的使用次數（如果 conversation_summaries 沒有記錄）
             # 因為 IP 人設規劃主要通過長期記憶 API 記錄
@@ -5487,8 +5571,8 @@ def create_app() -> FastAPI:
             if ip_planning_stats:
                 session_count = ip_planning_stats[0] if ip_planning_stats[0] else 0
                 # 如果 conversation_summaries 沒有記錄，使用長期記憶的會話數
-                if mode_stats["mode3_ip_planning"]["count"] == 0 and session_count > 0:
-                    mode_stats["mode3_ip_planning"]["count"] = session_count
+                if mode_stats["mode1_ip_planning"]["count"] == 0 and session_count > 0:
+                    mode_stats["mode1_ip_planning"]["count"] = session_count
             
             # 統計 IP 人設規劃生成的 Profile 數量（從 user_profiles 表或相關記錄）
             cursor.execute("""
@@ -5498,7 +5582,7 @@ def create_app() -> FastAPI:
             """)
             profile_result = cursor.fetchone()
             if profile_result and profile_result[0]:
-                mode_stats["mode3_ip_planning"]["profiles_generated"] = profile_result[0]
+                mode_stats["mode1_ip_planning"]["profiles_generated"] = profile_result[0]
             
             # 獲取各模式的時間分布（分別統計）
             time_distribution = {
@@ -5507,12 +5591,12 @@ def create_app() -> FastAPI:
                 "mode3": {"00:00-06:00": 0, "06:00-12:00": 0, "12:00-18:00": 0, "18:00-24:00": 0}
             }
             
-            # 統計 Mode1（一鍵生成）的時間分布
+            # 統計 Mode3（一鍵生成）的時間分布
             if use_postgresql:
                 cursor.execute("""
                     SELECT DATE_TRUNC('hour', created_at) as hour, COUNT(*) as count
                     FROM conversation_summaries
-                    WHERE conversation_type = 'account_positioning'
+                    WHERE conversation_type IN ('account_positioning', 'topic_selection', 'script_generation')
                     AND created_at >= CURRENT_TIMESTAMP - INTERVAL '30 days'
                     GROUP BY hour
                     ORDER BY hour
@@ -5521,7 +5605,7 @@ def create_app() -> FastAPI:
                 cursor.execute("""
                     SELECT strftime('%H', created_at) as hour, COUNT(*) as count
                     FROM conversation_summaries
-                    WHERE conversation_type = 'account_positioning'
+                    WHERE conversation_type IN ('account_positioning', 'topic_selection', 'script_generation')
                     AND created_at >= datetime('now', '-30 days')
                     GROUP BY hour
                     ORDER BY hour
@@ -5539,20 +5623,20 @@ def create_app() -> FastAPI:
                 
                 count = row[1]
                 if 0 <= hour < 6:
-                    time_distribution["mode1"]["00:00-06:00"] += count
+                    time_distribution["mode3"]["00:00-06:00"] += count
                 elif 6 <= hour < 12:
-                    time_distribution["mode1"]["06:00-12:00"] += count
+                    time_distribution["mode3"]["06:00-12:00"] += count
                 elif 12 <= hour < 18:
-                    time_distribution["mode1"]["12:00-18:00"] += count
+                    time_distribution["mode3"]["12:00-18:00"] += count
                 else:
-                    time_distribution["mode1"]["18:00-24:00"] += count
+                    time_distribution["mode3"]["18:00-24:00"] += count
             
             # 統計 Mode2（AI顧問）的時間分布
             if use_postgresql:
                 cursor.execute("""
                     SELECT DATE_TRUNC('hour', created_at) as hour, COUNT(*) as count
                     FROM conversation_summaries
-                    WHERE conversation_type IN ('topic_selection', 'script_generation', 'general_consultation')
+                    WHERE conversation_type = 'general_consultation'
                     AND created_at >= CURRENT_TIMESTAMP - INTERVAL '30 days'
                     GROUP BY hour
                     ORDER BY hour
@@ -5561,7 +5645,7 @@ def create_app() -> FastAPI:
                 cursor.execute("""
                     SELECT strftime('%H', created_at) as hour, COUNT(*) as count
                     FROM conversation_summaries
-                    WHERE conversation_type IN ('topic_selection', 'script_generation', 'general_consultation')
+                    WHERE conversation_type = 'general_consultation'
                     AND created_at >= datetime('now', '-30 days')
                     GROUP BY hour
                     ORDER BY hour
@@ -5587,7 +5671,7 @@ def create_app() -> FastAPI:
                 else:
                     time_distribution["mode2"]["18:00-24:00"] += count
             
-            # 統計 Mode3（IP人設規劃）的時間分布（從 long_term_memory 表）
+            # 統計 Mode1（IP人設規劃）的時間分布（從 long_term_memory 表）
             if use_postgresql:
                 cursor.execute("""
                     SELECT DATE_TRUNC('hour', created_at) as hour, COUNT(DISTINCT session_id) as count
@@ -7398,7 +7482,7 @@ def create_app() -> FastAPI:
                 "OrderResultURL": ECPAY_RETURN_URL,
                 "ChoosePayment": "Credit",
                 "EncryptType": 1,
-                # "ClientBackURL": ECPAY_RETURN_URL,
+                "ClientBackURL": ECPAY_RETURN_URL,
             }
             
             # 生成 CheckMacValue
@@ -7613,7 +7697,7 @@ def create_app() -> FastAPI:
                 "OrderResultURL": order_result_url_full,  # 前端頁面（用戶返回頁）- 完整 URL，不截斷
                 "ChoosePayment": "Credit",  # 使用信用卡付款
                 "EncryptType": 1,  # 必須帶，且要算進 CheckMacValue
-                "ClientBackURL": CLIENT_BACK_URL       # 👉 一定要放這
+                "ClientBackURL": CLIENT_BACK_URL,  # 一定要放這
             }
             
             # 驗證 ecpay_data 中的 URL 是否完整
@@ -7643,7 +7727,7 @@ def create_app() -> FastAPI:
                 logger.info(f"[ECPay REQUEST PAYLOAD] ChoosePayment={ecpay_data.get('ChoosePayment')}")
                 logger.info(f"[ECPay REQUEST PAYLOAD] EncryptType={ecpay_data.get('EncryptType')}")
                 logger.info(f"[ECPay REQUEST PAYLOAD] HashKey長度={len(ECPAY_HASH_KEY) if ECPAY_HASH_KEY else 0}, HashIV長度={len(ECPAY_HASH_IV) if ECPAY_HASH_IV else 0}")
-
+                
                 ecpay_data["ClientBackURL"] = CLIENT_BACK_URL
                 ecpay_data["CheckMacValue"] = gen_check_mac_value(ecpay_data)
                 # 使用 ERROR 級別確保在 Zeabur 日誌中可見
