@@ -10152,7 +10152,7 @@ def create_app() -> FastAPI:
 
     @app.delete("/api/user/orders/{order_id}")
     @rate_limit("10/minute")
-    async def delete_order(order_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
+    async def delete_order(order_id: str, request: Request, current_user_id: Optional[str] = Depends(get_current_user)):
         """刪除訂單功能已停用 - 訂單將由系統自動清理（超過24小時的待付款訂單）"""
         return JSONResponse({
             "error": "手動刪除功能已停用。超過24小時的待付款訂單將由系統自動清理。"
