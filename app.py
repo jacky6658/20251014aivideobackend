@@ -1049,31 +1049,16 @@ def generate_user_id(email: str) -> str:
 # ===== ECPay 金流功能 =====
 
 def gen_check_mac_value(params: dict) -> str:
-    """生成 ECPay 簽章（CheckMacValue）- 修正版
+    """生成 ECPay 簽章（CheckMacValue）- 標準版
     
-    根據 ECPay 官方文件（SHA256 版）：
-    1. 將所有參數（排除 CheckMacValue）轉成字串
-    2. 以 A–Z 排序（不分大小寫，使用 localeCompare 邏輯）
-    3. 組成：key=value&key2=value2...
-    4. 前後加上：HashKey=${HASH_KEY}& 和 &HashIV=${HASH_IV}
-    5. 對整串使用 encodeURIComponent（完整編碼）
-    6. 再把結果轉成小寫
-    7. 替換指定字元：
-       - %2d → -
-       - %5f → _
-       - %2e → .
-       - %21 → !
-       - %2a → *
-       - %28 → (
-       - %29 → )
-    8. 用 SHA256 hash
-    9. 把結果轉為大寫 hex → 即為 CheckMacValue
+    依照綠界官方 SHA256 規則產生 CheckMacValue
+    完全依照 ecpay_gen_check_mac_value_python.md 標準實作
     
     Args:
-        params: 包含所有參數的字典（不包含 CheckMacValue）
+        params: 送給綠界的所有欄位（不要事先塞 CheckMacValue）
     
     Returns:
-        簽章字串（大寫）
+        字串型態的 CheckMacValue（大寫十六進位）
     """
     if not ECPAY_HASH_KEY or not ECPAY_HASH_IV:
         raise ValueError("ECPAY_HASH_KEY 或 ECPAY_HASH_IV 未設定")
@@ -1085,63 +1070,53 @@ def gen_check_mac_value(params: dict) -> str:
     if not hash_key or not hash_iv:
         raise ValueError("ECPAY_HASH_KEY 或 ECPAY_HASH_IV 為空")
     
-    # 1. 將所有參數（排除 CheckMacValue）轉成字串，移除 None 和 undefined
+    # 0) 先轉成字串並移除 None，避免型別問題
     processed_params: dict[str, str] = {}
     for k, v in params.items():
-        if k == "CheckMacValue":
-            continue
-        if v is None or v == "":
+        if v is None:
             continue
         processed_params[k] = str(v)
     
-    # 2. 以 A–Z 排序（不分大小寫，使用 localeCompare 邏輯）
-    # Python 的 locale.strcoll 等價於 JavaScript 的 localeCompare
-    import locale
-    try:
-        # 嘗試使用系統 locale
-        sorted_keys = sorted(processed_params.keys(), key=lambda x: locale.strxfrm(x.lower()))
-    except (locale.Error, AttributeError):
-        # 如果 locale 不可用，使用簡單的字母排序（不分大小寫）
-        sorted_keys = sorted(processed_params.keys(), key=lambda x: x.lower())
+    # 1) 移除 CheckMacValue 自己（保險）
+    processed_params.pop("CheckMacValue", None)
     
-    # 3. 組成：key=value&key2=value2...
-    query = "&".join([f"{k}={processed_params[k]}" for k in sorted_keys])
+    # 2) 以參數名稱做 A–Z 排序（不分大小寫）
+    # 使用 sorted(items, key=lambda x: x[0].lower()) 等價於 JavaScript 的 localeCompare
+    sorted_items = sorted(processed_params.items(), key=lambda x: x[0].lower())
     
-    # 4. 前後加上：HashKey=${HASH_KEY}& 和 &HashIV=${HASH_IV}
+    # 3) 組成 key=value&key2=value2...
+    query = "&".join(f"{k}={v}" for k, v in sorted_items)
+    
+    # 4) 前後加上 HashKey / HashIV
     raw = f"HashKey={hash_key}&{query}&HashIV={hash_iv}"
     
-    # 5. 對整串使用 encodeURIComponent（完整編碼）
-    # Python 的 urllib.parse.quote 等價於 JavaScript 的 encodeURIComponent
-    import urllib.parse
-    # 不使用 safe 參數，完整編碼所有特殊字元
-    urlencoded = urllib.parse.quote(raw, safe="")
+    # 5) URLEncode（整串），並轉小寫
+    # 使用 quote_plus 等價於 JavaScript 的 encodeURIComponent
+    from urllib.parse import quote_plus
+    encoded = quote_plus(raw).lower()
     
-    # 6. 再把結果轉成小寫
-    urlencoded = urlencoded.lower()
+    # 6) 特定字元還原（與官方 .NET 行為一致）
+    encoded = (
+        encoded.replace("%2d", "-")
+        .replace("%5f", "_")
+        .replace("%2e", ".")
+        .replace("%21", "!")
+        .replace("%2a", "*")
+        .replace("%28", "(")
+        .replace("%29", ")")
+    )
     
-    # 7. 替換指定字元（按照 ECPay 官方規範）
-    urlencoded = urlencoded.replace("%2d", "-")
-    urlencoded = urlencoded.replace("%5f", "_")
-    urlencoded = urlencoded.replace("%2e", ".")
-    urlencoded = urlencoded.replace("%21", "!")
-    urlencoded = urlencoded.replace("%2a", "*")
-    urlencoded = urlencoded.replace("%28", "(")
-    urlencoded = urlencoded.replace("%29", ")")
-    
-    # 8. 用 SHA256 hash
-    signature = hashlib.sha256(urlencoded.encode("utf-8")).hexdigest()
-    
-    # 9. 把結果轉為大寫 hex
-    signature = signature.upper()
+    # 7) SHA256 雜湊並轉成大寫十六進位
+    mac = hashlib.sha256(encoded.encode("utf-8")).hexdigest().upper()
     
     # 記錄調試資訊（用於診斷）
     import logging
     logger = logging.getLogger(__name__)
     logger.debug(f"[ECPay CheckMacValue] 參數數量={len(processed_params)}, HashKey長度={len(hash_key)}, HashIV長度={len(hash_iv)}")
-    logger.debug(f"[ECPay CheckMacValue] 原始字串長度={len(raw)}, URL編碼後長度={len(urlencoded)}")
-    logger.debug(f"[ECPay CheckMacValue] 排序後的參數: {sorted_keys}")
+    logger.debug(f"[ECPay CheckMacValue] 原始字串長度={len(raw)}, URL編碼後長度={len(encoded)}")
+    logger.debug(f"[ECPay CheckMacValue] 排序後的參數: {[k for k, v in sorted_items]}")
     
-    return signature
+    return mac
 
 
 def verify_ecpay_signature(params: dict) -> bool:
@@ -7645,9 +7620,13 @@ def create_app() -> FastAPI:
             logger.error(f"[ECPay診斷] 表單參數摘要: {param_summary}")
             
             # 生成表單 input 欄位
-            # 注意：不要對參數值進行 HTML 編碼，讓瀏覽器自然處理
-            # ECPay 需要接收原始參數值，瀏覽器會自動進行 URL 編碼
-            inputs = "\n".join([f'<input type="hidden" name="{k}" value="{v}"/>' for k, v in ecpay_data.items()])
+            # 注意：需要對 HTML 屬性值進行轉義（防止特殊字元破壞 HTML 結構）
+            # 但不要對參數值進行 URL 編碼，讓瀏覽器在提交表單時自動進行 URL 編碼
+            # ECPay 需要接收原始參數值（瀏覽器會自動 URL 編碼）
+            inputs = "\n".join([
+                f'<input type="hidden" name="{html.escape(str(k))}" value="{html.escape(str(v))}"/>' 
+                for k, v in ecpay_data.items()
+            ])
             
             # 記錄完整的參數值（用於診斷）
             logger.error(f"[ECPay診斷] 完整參數值: MerchantID={ecpay_data.get('MerchantID')}, TradeNo={ecpay_data.get('MerchantTradeNo')}, Amount={ecpay_data.get('TotalAmount')}")
