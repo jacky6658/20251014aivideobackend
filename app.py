@@ -11166,7 +11166,7 @@ ReelMind 系統自動發送
 
     @app.delete("/api/admin/orders/{order_id}")
     @rate_limit("10/minute")
-    async def admin_delete_order(order_id: str, admin_user: str = Depends(get_admin_user)):
+    async def admin_delete_order(order_id: str, request: Request, admin_user: str = Depends(get_admin_user)):
         """刪除訂單（管理員專用，可刪除任何狀態的訂單）"""
         conn = None
         try:
