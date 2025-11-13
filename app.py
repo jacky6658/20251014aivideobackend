@@ -609,6 +609,18 @@ def init_database():
         )
     """)
     
+    # 創建訂單清理日誌表（order_cleanup_logs）
+    execute_sql("""
+        CREATE TABLE IF NOT EXISTS order_cleanup_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cleanup_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            deleted_count INTEGER DEFAULT 0,
+            deleted_orders TEXT,
+            details TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
     # 創建購買訂單表（orders）
     execute_sql("""
         CREATE TABLE IF NOT EXISTS orders (
@@ -8951,8 +8963,12 @@ def create_app() -> FastAPI:
                 # 如果建立 orders 記錄失敗，記錄錯誤但不影響授權流程
                 logger.warning(f"建立 orders 記錄失敗（不影響授權）: {e}")
             
-            if not use_postgresql:
+            # 確保所有資料庫變更都已提交
+            if use_postgresql:
                 conn.commit()
+            else:
+                conn.commit()
+            
             cursor.close()
             conn.close()
             
@@ -10134,6 +10150,14 @@ def create_app() -> FastAPI:
             logger.error(f"獲取訂單列表失敗: {e}", exc_info=True)
             return JSONResponse({"error": "服務器錯誤，請稍後再試"}, status_code=500)
 
+    @app.delete("/api/user/orders/{order_id}")
+    @rate_limit("10/minute")
+    async def delete_order(order_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
+        """刪除訂單功能已停用 - 訂單將由系統自動清理（超過24小時的待付款訂單）"""
+        return JSONResponse({
+            "error": "手動刪除功能已停用。超過24小時的待付款訂單將由系統自動清理。"
+        }, status_code=403)
+    
     @app.get("/api/user/orders/{order_id}")
     @rate_limit("30/minute")  # 添加 Rate Limiting
     async def get_order_detail(order_id: str, request: Request, current_user_id: Optional[str] = Depends(get_current_user)):
@@ -10328,6 +10352,156 @@ def create_app() -> FastAPI:
         except Exception as e:
             logger.error(f"更新自動續費狀態失敗: {e}", exc_info=True)
             return JSONResponse({"error": "服務器錯誤，請稍後再試"}, status_code=500)
+
+    @app.post("/api/cron/cleanup-pending-orders")
+    async def cleanup_pending_orders(
+        request: Request,
+        cron_secret: Optional[str] = None
+    ):
+        """
+        自動清理超過24小時的待付款訂單
+        
+        這個端點應該由定時任務（Cron Job）定期調用，建議每天執行一次。
+        可以通過 Zeabur Cron Job、n8n、或其他自動化工具調用。
+        
+        參數：
+        - cron_secret: 可選的安全密鑰，用於驗證調用來源（建議設定環境變數 CRON_SECRET）
+        """
+        # 驗證 Cron Secret（如果設定了）
+        expected_secret = os.getenv("CRON_SECRET")
+        if expected_secret:
+            provided_secret = cron_secret or request.headers.get("X-Cron-Secret") or request.query_params.get("secret")
+            if provided_secret != expected_secret:
+                logger.warning("清理訂單任務調用被拒絕：密鑰不匹配")
+                return JSONResponse({"error": "未授權"}, status_code=401)
+        
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 計算24小時前的時間
+            now = get_taiwan_time()
+            hours_ago = now - timedelta(hours=24)
+            
+            # 查詢超過24小時的待付款訂單
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT order_id, user_id, amount, plan_type, created_at
+                    FROM orders
+                    WHERE payment_status = 'pending'
+                    AND created_at < %s
+                """, (hours_ago,))
+            else:
+                cursor.execute("""
+                    SELECT order_id, user_id, amount, plan_type, created_at
+                    FROM orders
+                    WHERE payment_status = 'pending'
+                    AND created_at < ?
+                """, (hours_ago.timestamp(),))
+            
+            expired_orders = cursor.fetchall()
+            
+            if not expired_orders:
+                cursor.close()
+                if conn:
+                    conn.close()
+                logger.info("清理訂單任務：沒有需要清理的訂單")
+                return {
+                    "success": True,
+                    "message": "沒有需要清理的訂單",
+                    "deleted_count": 0
+                }
+            
+            # 收集訂單資訊
+            deleted_order_ids = []
+            deleted_orders_info = []
+            total_amount = 0
+            
+            for order in expired_orders:
+                order_id = order[0]
+                user_id = order[1]
+                amount = order[2] or 0
+                plan_type = order[3] or 'unknown'
+                created_at = order[4]
+                
+                deleted_order_ids.append(order_id)
+                deleted_orders_info.append({
+                    "order_id": order_id,
+                    "user_id": user_id,
+                    "amount": amount,
+                    "plan_type": plan_type,
+                    "created_at": created_at.isoformat() if isinstance(created_at, datetime) else str(created_at)
+                })
+                total_amount += amount
+            
+            # 刪除訂單
+            if use_postgresql:
+                cursor.execute("""
+                    DELETE FROM orders
+                    WHERE payment_status = 'pending'
+                    AND created_at < %s
+                """, (hours_ago,))
+            else:
+                cursor.execute("""
+                    DELETE FROM orders
+                    WHERE payment_status = 'pending'
+                    AND created_at < ?
+                """, (hours_ago.timestamp(),))
+            
+            deleted_count = cursor.rowcount
+            
+            # 記錄清理日誌
+            cleanup_details = {
+                "deleted_orders": deleted_orders_info,
+                "total_amount": total_amount,
+                "cleanup_time": now.isoformat(),
+                "hours_threshold": 24
+            }
+            
+            if use_postgresql:
+                cursor.execute("""
+                    INSERT INTO order_cleanup_logs (cleanup_date, deleted_count, deleted_orders, details)
+                    VALUES (%s, %s, %s, %s)
+                """, (now, deleted_count, ','.join(deleted_order_ids), json.dumps(cleanup_details, ensure_ascii=False)))
+            else:
+                # SQLite 使用 timestamp
+                cleanup_date_ts = now.timestamp() if isinstance(now, datetime) else now
+                cursor.execute("""
+                    INSERT INTO order_cleanup_logs (cleanup_date, deleted_count, deleted_orders, details)
+                    VALUES (?, ?, ?, ?)
+                """, (cleanup_date_ts, deleted_count, ','.join(deleted_order_ids), json.dumps(cleanup_details, ensure_ascii=False)))
+            
+            if not use_postgresql:
+                conn.commit()
+            
+            cursor.close()
+            if conn:
+                conn.close()
+            
+            logger.info(f"清理訂單任務完成：刪除了 {deleted_count} 筆超過24小時的待付款訂單，總金額 NT${total_amount}")
+            
+            return {
+                "success": True,
+                "message": f"成功清理 {deleted_count} 筆訂單",
+                "deleted_count": deleted_count,
+                "total_amount": total_amount,
+                "deleted_order_ids": deleted_order_ids
+            }
+            
+        except Exception as e:
+            logger.error(f"清理訂單任務失敗: {e}", exc_info=True)
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
+            return JSONResponse({
+                "error": f"清理失敗: {str(e)}"
+            }, status_code=500)
 
     @app.post("/api/cron/check-renewals")
     async def check_and_create_renewal_orders(
@@ -10989,6 +11163,148 @@ ReelMind 系統自動發送
         except Exception as e:
             print(f"管理員登入錯誤: {e}")
             return JSONResponse({"error": str(e)}, status_code=500)
+
+    @app.delete("/api/admin/orders/{order_id}")
+    @rate_limit("10/minute")
+    async def admin_delete_order(order_id: str, admin_user: str = Depends(get_admin_user)):
+        """刪除訂單（管理員專用，可刪除任何狀態的訂單）"""
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            # 先查詢訂單是否存在
+            if use_postgresql:
+                cursor.execute(
+                    "SELECT user_id, order_id, payment_status, amount FROM orders WHERE order_id = %s",
+                    (order_id,)
+                )
+            else:
+                cursor.execute(
+                    "SELECT user_id, order_id, payment_status, amount FROM orders WHERE order_id = ?",
+                    (order_id,)
+                )
+            
+            order = cursor.fetchone()
+            
+            if not order:
+                cursor.close()
+                if conn:
+                    conn.close()
+                return JSONResponse({"error": "訂單不存在"}, status_code=404)
+            
+            order_user_id, order_id_db, payment_status, amount = order
+            
+            # 管理員可以刪除任何訂單（包括已付款的）
+            # 刪除訂單
+            if use_postgresql:
+                cursor.execute(
+                    "DELETE FROM orders WHERE order_id = %s",
+                    (order_id,)
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM orders WHERE order_id = ?",
+                    (order_id,)
+                )
+            
+            deleted_count = cursor.rowcount
+            
+            if not use_postgresql:
+                conn.commit()
+            
+            cursor.close()
+            if conn:
+                conn.close()
+            
+            if deleted_count > 0:
+                logger.info(f"管理員 {admin_user} 刪除訂單: order_id={order_id}, user_id={order_user_id}, status={payment_status}, amount={amount}")
+                return {
+                    "success": True,
+                    "message": "訂單已刪除",
+                    "order_id": order_id,
+                    "deleted_by": admin_user
+                }
+            else:
+                return JSONResponse({"error": "刪除失敗"}, status_code=500)
+                
+        except Exception as e:
+            logger.error(f"管理員刪除訂單失敗: {e}", exc_info=True)
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
+            return JSONResponse({"error": f"刪除失敗: {str(e)}"}, status_code=500)
+
+    @app.get("/api/admin/order-cleanup-logs")
+    async def get_order_cleanup_logs(admin_user: str = Depends(get_admin_user)):
+        """獲取訂單清理日誌（管理員用）"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT id, cleanup_date, deleted_count, deleted_orders, details, created_at
+                    FROM order_cleanup_logs
+                    ORDER BY cleanup_date DESC
+                    LIMIT 100
+                """)
+            else:
+                cursor.execute("""
+                    SELECT id, cleanup_date, deleted_count, deleted_orders, details, created_at
+                    FROM order_cleanup_logs
+                    ORDER BY cleanup_date DESC
+                    LIMIT 100
+                """)
+            
+            logs = []
+            for row in cursor.fetchall():
+                log_id, cleanup_date, deleted_count, deleted_orders, details, created_at = row
+                
+                # 處理日期時間
+                if use_postgresql:
+                    cleanup_date_str = cleanup_date.isoformat() if cleanup_date else None
+                    created_at_str = created_at.isoformat() if created_at else None
+                else:
+                    cleanup_date_str = datetime.fromtimestamp(cleanup_date).isoformat() if cleanup_date else None
+                    created_at_str = datetime.fromtimestamp(created_at).isoformat() if created_at else None
+                
+                # 解析 details JSON
+                details_obj = {}
+                if details:
+                    try:
+                        details_obj = json.loads(details) if isinstance(details, str) else details
+                    except:
+                        details_obj = {}
+                
+                logs.append({
+                    "id": log_id,
+                    "cleanup_date": cleanup_date_str,
+                    "deleted_count": deleted_count or 0,
+                    "deleted_orders": deleted_orders or "",
+                    "details": details_obj,
+                    "created_at": created_at_str
+                })
+            
+            cursor.close()
+            conn.close()
+            return {"logs": logs}
+        except Exception as e:
+            logger.error(f"獲取清理日誌失敗: {e}", exc_info=True)
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
+            return JSONResponse({"error": f"獲取清理日誌失敗: {str(e)}"}, status_code=500)
 
     @app.get("/api/admin/orders")
     async def get_all_orders(admin_user: str = Depends(get_admin_user)):
