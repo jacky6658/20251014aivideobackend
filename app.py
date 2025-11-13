@@ -8800,7 +8800,7 @@ def create_app() -> FastAPI:
             
             activation_id, channel, order_id, email, plan_type, amount, status, link_expires_at, license_expires_at, activated_at, activated_by_user_id = activation
             
-            # 檢查是否已啟用
+            # 檢查是否已啟用（必須在更新之前檢查，並且使用資料庫鎖定防止併發）
             if status == "activated":
                 # 如果用戶已登入，檢查是否為同一個帳戶
                 if current_user_id:
@@ -8847,6 +8847,8 @@ def create_app() -> FastAPI:
                                     activated_at_aware = ensure_timezone_aware(activated_at) if isinstance(activated_at, datetime) else activated_at
                                     activated_at_iso = activated_at_aware.isoformat() if isinstance(activated_at_aware, datetime) else str(activated_at_aware)
                                 
+                                cursor.close()
+                                conn.close()
                                 return {
                                     "status": "already_activated",
                                     "message": "您已經啟用此授權了！",
@@ -8863,6 +8865,8 @@ def create_app() -> FastAPI:
                     activated_at_aware = ensure_timezone_aware(activated_at) if isinstance(activated_at, datetime) else activated_at
                     activated_at_iso = activated_at_aware.isoformat() if isinstance(activated_at_aware, datetime) else str(activated_at_aware)
                 
+                cursor.close()
+                conn.close()
                 activated_info = {
                     "error": "此授權連結已使用",
                     "message": "此授權連結已被使用，無法重複啟用",
@@ -8930,14 +8934,15 @@ def create_app() -> FastAPI:
                 days = 30 if plan_type == "monthly" else 365
                 license_expire_dt = get_taiwan_time() + timedelta(days=days)
             
-            # 更新授權記錄為已啟用
+            # 使用原子性更新：只有在狀態不是 'activated' 時才更新（防止重複使用）
+            # 這樣可以防止併發請求同時啟用同一個連結
             if use_postgresql:
                 cursor.execute("""
                     UPDATE license_activations 
                     SET status = 'activated',
                         activated_at = CURRENT_TIMESTAMP,
                         activated_by_user_id = %s
-                    WHERE id = %s
+                    WHERE id = %s AND status != 'activated'
                 """, (current_user_id, activation_id))
             else:
                 cursor.execute("""
@@ -8945,8 +8950,22 @@ def create_app() -> FastAPI:
                     SET status = 'activated',
                         activated_at = CURRENT_TIMESTAMP,
                         activated_by_user_id = ?
-                    WHERE id = ?
+                    WHERE id = ? AND status != 'activated'
                 """, (current_user_id, activation_id))
+            
+            # 檢查是否有行被更新（如果沒有，表示連結已被使用）
+            rows_updated = cursor.rowcount
+            if rows_updated == 0:
+                # 連結已被使用（可能是併發請求）
+                cursor.close()
+                conn.close()
+                logger.warning(f"授權連結已被使用（併發請求）: activation_id={activation_id}, token={token[:20]}...")
+                activated_info = {
+                    "error": "此授權連結已使用",
+                    "message": "此授權連結已被使用，無法重複啟用",
+                    "contact": "如有問題請聯繫客服：aiagent168168@gmail.com"
+                }
+                return JSONResponse(activated_info, status_code=400)
             
             # 建立/更新 licenses 記錄
             if use_postgresql:
