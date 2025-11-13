@@ -7398,7 +7398,7 @@ def create_app() -> FastAPI:
                 "OrderResultURL": ECPAY_RETURN_URL,
                 "ChoosePayment": "Credit",
                 "EncryptType": 1,
-                "ClientBackURL": ECPAY_RETURN_URL,
+                # "ClientBackURL": ECPAY_RETURN_URL,
             }
             
             # 生成 CheckMacValue
@@ -7613,7 +7613,7 @@ def create_app() -> FastAPI:
                 "OrderResultURL": order_result_url_full,  # 前端頁面（用戶返回頁）- 完整 URL，不截斷
                 "ChoosePayment": "Credit",  # 使用信用卡付款
                 "EncryptType": 1,  # 必須帶，且要算進 CheckMacValue
-                "ClientBackURL": return_url_base,  # 取消付款返回頁
+                # 不要有 ClientBackURL
             }
             
             # 驗證 ecpay_data 中的 URL 是否完整
