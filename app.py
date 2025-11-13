@@ -60,6 +60,21 @@ def get_taiwan_time():
     """獲取台灣時區的當前時間"""
     return datetime.now(TAIWAN_TZ)
 
+def ensure_timezone_aware(dt: datetime) -> datetime:
+    """確保 datetime 對象是 timezone-aware（轉換為台灣時區）
+    
+    如果 datetime 是 timezone-naive，假設它是台灣時區並添加時區資訊。
+    如果 datetime 是 timezone-aware，轉換為台灣時區。
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        # timezone-naive，假設是台灣時區
+        return dt.replace(tzinfo=TAIWAN_TZ)
+    else:
+        # timezone-aware，轉換為台灣時區
+        return dt.astimezone(TAIWAN_TZ)
+
 
 # ===== BYOK 加密功能 =====
 
@@ -8788,10 +8803,16 @@ def create_app() -> FastAPI:
             # 檢查是否已啟用
             if status == "activated":
                 # 返回更詳細的錯誤訊息，包括啟用時間和啟用用戶資訊
+                activated_at_iso = None
+                if activated_at:
+                    # 確保 activated_at 是 timezone-aware 再轉換為 ISO 格式
+                    activated_at_aware = ensure_timezone_aware(activated_at) if isinstance(activated_at, datetime) else activated_at
+                    activated_at_iso = activated_at_aware.isoformat() if isinstance(activated_at_aware, datetime) else str(activated_at_aware)
+                
                 activated_info = {
                     "error": "此授權連結已使用",
                     "message": "此授權連結已被使用，無法重複啟用",
-                    "activated_at": activated_at.isoformat() if activated_at else None,
+                    "activated_at": activated_at_iso,
                     "activated_by": activated_by_user_id if activated_by_user_id else None,
                     "contact": "如有問題請聯繫客服：aiagent168168@gmail.com"
                 }
@@ -8803,6 +8824,9 @@ def create_app() -> FastAPI:
                     expire_dt = link_expires_at
                 else:
                     expire_dt = datetime.fromtimestamp(link_expires_at)
+                
+                # 確保 expire_dt 是 timezone-aware（轉換為台灣時區）
+                expire_dt = ensure_timezone_aware(expire_dt)
                 
                 if expire_dt < get_taiwan_time():
                     # 更新狀態為過期
@@ -8819,10 +8843,11 @@ def create_app() -> FastAPI:
                     if not use_postgresql:
                         conn.commit()
                     # 返回更詳細的錯誤訊息，包括過期時間和聯繫方式
+                    # expire_dt 已經是 timezone-aware，可以直接使用 isoformat()
                     expired_info = {
                         "error": "授權連結已過期",
                         "message": "此授權連結已超過有效期限（7天），無法使用",
-                        "expired_at": expire_dt.isoformat(),
+                        "expired_at": expire_dt.isoformat() if isinstance(expire_dt, datetime) else str(expire_dt),
                         "contact": "如有問題請聯繫客服：aiagent168168@gmail.com",
                         "suggestion": "請聯繫原購買通路重新申請授權連結"
                     }
@@ -8841,6 +8866,10 @@ def create_app() -> FastAPI:
                 license_expire_dt = license_expires_at
             else:
                 license_expire_dt = datetime.fromtimestamp(license_expires_at) if license_expires_at else None
+            
+            # 確保 license_expire_dt 是 timezone-aware（如果存在）
+            if license_expire_dt:
+                license_expire_dt = ensure_timezone_aware(license_expire_dt)
             
             if not license_expire_dt:
                 # 如果沒有設定到期日，計算 1 年
