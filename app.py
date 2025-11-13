@@ -228,6 +228,7 @@ except ImportError:
 
 # 導入新的記憶系統模組
 from memory import stm
+from rag import get_rag_instance, RAGSystem
 from prompt_builder import build_enhanced_prompt, format_memory_for_display
 
 
@@ -3225,6 +3226,54 @@ def create_app() -> FastAPI:
         conversation_type = body.conversation_type or None
         ltm_memory = get_user_memory(user_id, conversation_type) if user_id else ""
         
+        # 2.5. RAG 檢索相關內容
+        rag_context = ""
+        if user_id:
+            # 優先使用用戶的 API Key（BYOK）
+            # 注意：RAG 目前只支援 Gemini embedding，如果用戶使用 GPT key，RAG 會使用系統 key
+            user_rag_key = None
+            user_provider = None
+            
+            # 檢查用戶是否有 Gemini key
+            user_gemini_key = get_user_llm_key(user_id, "gemini")
+            if user_gemini_key:
+                user_rag_key = user_gemini_key
+                user_provider = "gemini"
+            else:
+                # 如果用戶沒有 Gemini key，檢查是否有其他 key（如 GPT）
+                # 但 RAG 目前只支援 Gemini，所以使用系統 key
+                user_provider = None
+            
+            # 獲取 RAG 實例（優先使用用戶的 Gemini key，否則使用系統 key）
+            rag_system = get_rag_instance(user_id=user_id, user_api_key=user_rag_key)
+            
+            if rag_system:
+                try:
+                    # 組合查詢關鍵字（從用戶訊息、主題、定位等）
+                    query_parts = []
+                    if body.message:
+                        query_parts.append(body.message)
+                    if body.topic:
+                        query_parts.append(body.topic)
+                    if body.profile:
+                        query_parts.append(body.profile)
+                    
+                    if query_parts:
+                        query = " ".join(query_parts)
+                        # 搜尋相關內容
+                        relevant_content = rag_system.search_relevant_content(
+                            query=query,
+                            user_id=user_id,
+                            content_types=['script', 'ip_planning'],
+                            limit=3  # 最多返回 3 個相關結果
+                        )
+                        
+                        if relevant_content:
+                            rag_context = rag_system.format_retrieved_content(relevant_content)
+                except Exception as e:
+                    logger.warning(f"RAG 檢索失敗: {e}")
+                    # RAG 失敗不影響主要功能，繼續執行
+        
         # 3. 組合增強版 prompt
         system_text = build_enhanced_prompt(
             kb_text=kb_text_cache,
@@ -3234,7 +3283,8 @@ def create_app() -> FastAPI:
             profile=body.profile,
             topic=body.topic,
             style=body.style,
-            duration=body.duration
+            duration=body.duration,
+            rag_context=rag_context
         )
         
         # 4. 合併前端傳來的 history 和 STM history
@@ -3865,6 +3915,29 @@ def create_app() -> FastAPI:
                 
                 conn.close()
                 
+                # 自動索引到 RAG 系統
+                try:
+                    # 優先使用用戶的 Gemini key，否則使用系統 key
+                    user_gemini_key = get_user_llm_key(user_id, "gemini")
+                    rag_system = get_rag_instance(user_id=user_id, user_api_key=user_gemini_key)
+                    if rag_system:
+                        rag_system.index_script(
+                            script_id=str(script_id),
+                            script_data={
+                                'title': script_data.get("title", ""),
+                                'content': content,
+                                'script_data': script_data,
+                                'platform': platform,
+                                'topic': topic,
+                                'profile': profile,
+                                'created_at': datetime.now().isoformat()
+                            },
+                            user_id=user_id
+                        )
+                except Exception as e:
+                    logger.warning(f"RAG 索引失敗: {e}")
+                    # 索引失敗不影響儲存功能
+                
                 return {
                     "success": True,
                     "script_id": script_id,
@@ -3958,6 +4031,26 @@ def create_app() -> FastAPI:
                 result_id = cursor.lastrowid
             
             conn.close()
+            
+            # 自動索引到 RAG 系統
+            try:
+                # 優先使用用戶的 Gemini key，否則使用系統 key
+                user_gemini_key = get_user_llm_key(user_id, "gemini")
+                rag_system = get_rag_instance(user_id=user_id, user_api_key=user_gemini_key)
+                if rag_system:
+                    rag_system.index_ip_planning(
+                        result_id=str(result_id),
+                        result_data={
+                            'content': content,
+                            'result_type': result_type,
+                            'title': title,
+                            'created_at': datetime.now().isoformat()
+                        },
+                        user_id=user_id
+                    )
+            except Exception as e:
+                logger.warning(f"RAG 索引失敗: {e}")
+                # 索引失敗不影響儲存功能
             
             return {
                 "success": True,

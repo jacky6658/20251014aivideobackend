@@ -13,7 +13,8 @@ def build_enhanced_prompt(
     profile: Optional[str],
     topic: Optional[str],
     style: Optional[str],
-    duration: Optional[str]
+    duration: Optional[str],
+    rag_context: Optional[str] = None
 ) -> str:
     """
     組合增強版 prompt
@@ -140,7 +141,15 @@ def build_enhanced_prompt(
 - 用戶要求生成時，表示他們想要新的內容，直接生成即可，不要提醒或引用舊內容
 """)
     
-    # 5. 知識庫
+    # 5. RAG 檢索內容（如果有的話）
+    if rag_context:
+        prompt_parts.append(f"""
+{rag_context}
+
+⚠️ 重要：參考上述相關歷史內容，但不要直接複製，而是根據用戶當前需求生成新的、更適合的內容。
+""")
+    
+    # 6. 知識庫
     if kb_text:
         prompt_parts.append(f"""
 📖 短影音知識庫：
