@@ -9901,6 +9901,27 @@ def create_app() -> FastAPI:
                 """, (current_user_id,))
             
             row = cursor.fetchone()
+            
+            # 同時檢查 licenses 表，確定真實的訂閱狀態
+            # 如果 licenses 表中有有效的授權記錄，即使 user_auth.is_subscribed 為 0，也應該視為已訂閱
+            has_active_license = False
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT COUNT(*) 
+                    FROM licenses 
+                    WHERE user_id = %s AND status = 'active' AND expires_at > CURRENT_TIMESTAMP
+                """, (current_user_id,))
+            else:
+                cursor.execute("""
+                    SELECT COUNT(*) 
+                    FROM licenses 
+                    WHERE user_id = ? AND status = 'active' AND expires_at > datetime('now')
+                """, (current_user_id,))
+            
+            license_count = cursor.fetchone()
+            if license_count and license_count[0] > 0:
+                has_active_license = True
+            
             conn.close()
             
             if row:
@@ -9930,13 +9951,17 @@ def create_app() -> FastAPI:
                         print(f"格式化日期時出錯: {e}")
                         pass
                 
+                # 確定訂閱狀態：如果有有效的授權記錄，視為已訂閱
+                # 否則使用 user_auth.is_subscribed 的值
+                is_subscribed = has_active_license or bool(row[4]) if row[4] is not None else has_active_license
+                
                 return {
                     "user_id": current_user_id,
                     "google_id": row[0],
                     "email": row[1],
                     "name": row[2],
                     "picture": row[3],
-                    "is_subscribed": bool(row[4]) if row[4] is not None else True,  # 預設為已訂閱
+                    "is_subscribed": is_subscribed,
                     "created_at": created_at
                 }
             else:
