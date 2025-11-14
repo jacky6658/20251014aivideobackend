@@ -2736,6 +2736,7 @@ def create_app() -> FastAPI:
             "/api/health",
             "/api/auth/google/callback",
             "/api/auth/google/callback-post",
+            "/api/auth/refresh",  # Token 刷新端點（使用 JWT 認證，不需要 CSRF）
             "/api/admin/auth/login",  # 管理員登入端點（用戶尚未登入，無法獲取 CSRF Token）
             "/api/payment/webhook",  # ECPay Webhook（使用簽章驗證）
             "/api/payment/return-url",  # ECPay ReturnURL（伺服器端通知，使用簽章驗證）
@@ -8244,9 +8245,19 @@ def create_app() -> FastAPI:
         必須驗證簽章和 IP 白名單。
         """
         try:
-            # 獲取表單數據
-            form = await request.form()
-            params = dict(form.items())
+            # 獲取表單數據（ECPay 使用 POST form-urlencoded）
+            # 為了確保正確處理 UTF-8 編碼，先讀取原始 body
+            body_bytes = await request.body()
+            # 使用 UTF-8 解碼（ECPay 使用 UTF-8 編碼）
+            body_str = body_bytes.decode('utf-8')
+            # 手動解析 form-urlencoded 數據
+            from urllib.parse import parse_qs, unquote_plus
+            params_dict = parse_qs(body_str, keep_blank_values=True)
+            # 將列表值轉為單一值（parse_qs 返回列表）
+            params = {k: v[0] if isinstance(v, list) and len(v) > 0 else (v if not isinstance(v, list) else '') 
+                     for k, v in params_dict.items()}
+            # 確保所有值都是 UTF-8 編碼的字串
+            params = {k: unquote_plus(str(v)) if v else '' for k, v in params.items()}
             
             # 記錄 Webhook 接收到的參數（隱藏敏感資訊）
             logger.error(f"[ECPay WEBHOOK] 收到 Webhook 通知")
@@ -8573,8 +8584,18 @@ def create_app() -> FastAPI:
         """
         try:
             # 獲取表單數據（ECPay 使用 POST form-urlencoded）
-            form = await request.form()
-            params = dict(form.items())
+            # 為了確保正確處理 UTF-8 編碼，先讀取原始 body
+            body_bytes = await request.body()
+            # 使用 UTF-8 解碼（ECPay 使用 UTF-8 編碼）
+            body_str = body_bytes.decode('utf-8')
+            # 手動解析 form-urlencoded 數據
+            from urllib.parse import parse_qs, unquote_plus
+            params_dict = parse_qs(body_str, keep_blank_values=True)
+            # 將列表值轉為單一值（parse_qs 返回列表）
+            params = {k: v[0] if isinstance(v, list) and len(v) > 0 else (v if not isinstance(v, list) else '') 
+                     for k, v in params_dict.items()}
+            # 確保所有值都是 UTF-8 編碼的字串
+            params = {k: unquote_plus(str(v)) if v else '' for k, v in params.items()}
             
             # 記錄 ReturnURL 接收到的參數
             logger.info(f"[ECPay RETURN-URL] 收到 ReturnURL 通知")
