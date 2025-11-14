@@ -8671,29 +8671,81 @@ def create_app() -> FastAPI:
                     return PlainTextResponse("1|OK")  # 仍然返回 OK，避免重複通知
                 
                 # 付款成功，更新訂單狀態
+                # 解析付款時間
+                paid_at_datetime = None
+                if payment_date:
+                    try:
+                        paid_at_datetime = datetime.strptime(payment_date, "%Y/%m/%d %H:%M:%S")
+                    except:
+                        try:
+                            paid_at_datetime = datetime.strptime(payment_date, "%Y/%m/%d")
+                        except:
+                            paid_at_datetime = get_taiwan_time()
+                else:
+                    paid_at_datetime = get_taiwan_time()
+                
+                # 計算到期時間
+                if plan_type == "yearly":
+                    expires_dt = paid_at_datetime + timedelta(days=365)
+                else:
+                    expires_dt = paid_at_datetime + timedelta(days=30)
+                
+                # 更新訂單狀態
                 if use_postgresql:
                     cursor.execute("""
                         UPDATE orders 
                         SET payment_status = %s,
+                            payment_method = %s,
                             trade_no = %s,
-                            payment_date = %s,
+                            paid_at = %s,
+                            expires_at = %s,
                             raw_payload = %s,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE order_id = %s
-                    """, ("paid", trade_no, payment_date or None, raw_payload_json, merchant_trade_no))
+                    """, ("paid", payment_type or "ecpay", trade_no, paid_at_datetime, expires_dt, raw_payload_json, merchant_trade_no))
                 else:
                     cursor.execute("""
                         UPDATE orders 
                         SET payment_status = ?,
+                            payment_method = ?,
                             trade_no = ?,
-                            payment_date = ?,
+                            paid_at = ?,
+                            expires_at = ?,
                             raw_payload = ?,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE order_id = ?
-                    """, ("paid", trade_no, payment_date or None, raw_payload_json, merchant_trade_no))
+                    """, ("paid", payment_type or "ecpay", trade_no, paid_at_datetime, expires_dt, raw_payload_json, merchant_trade_no))
+                
+                # 更新/建立 licenses 記錄（只在付款完成時）
+                if use_postgresql:
+                    cursor.execute("""
+                        INSERT INTO licenses (user_id, tier, seats, expires_at, status, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        ON CONFLICT (user_id) DO UPDATE SET
+                            tier = EXCLUDED.tier,
+                            seats = EXCLUDED.seats,
+                            expires_at = EXCLUDED.expires_at,
+                            status = EXCLUDED.status,
+                            updated_at = CURRENT_TIMESTAMP
+                    """, (user_id, plan_type, 1, expires_dt, "active"))
+                else:
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO licenses (user_id, tier, seats, expires_at, status, updated_at)
+                        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """, (user_id, plan_type, 1, expires_dt.timestamp(), "active"))
+                
+                # 更新用戶訂閱狀態
+                if use_postgresql:
+                    cursor.execute("""
+                        UPDATE user_auth SET is_subscribed = 1 WHERE user_id = %s
+                    """, (user_id,))
+                else:
+                    cursor.execute("""
+                        UPDATE user_auth SET is_subscribed = 1 WHERE user_id = ?
+                    """, (user_id,))
                 
                 conn.commit()
-                logger.info(f"[ECPay RETURN-URL] 訂單 {merchant_trade_no} 已更新為已付款")
+                logger.info(f"[ECPay RETURN-URL] 訂單 {merchant_trade_no} 已更新為已付款，並建立授權記錄")
                 
             except Exception as e:
                 logger.error(f"[ECPay RETURN-URL] 更新訂單狀態失敗: {e}", exc_info=True)
