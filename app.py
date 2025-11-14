@@ -221,6 +221,57 @@ def get_user_llm_key(user_id: Optional[str], provider: str = "gemini") -> Option
         print(f"ERROR: 獲取用戶 LLM Key 失敗 - 類型: {error_type}, 訊息: {error_msg}")
         return None
 
+
+def get_user_llm_model(user_id: Optional[str], provider: str = "gemini", default_model: str = None) -> Optional[str]:
+    """獲取用戶選擇的 LLM 模型名稱（如果有的話）
+    
+    Args:
+        user_id: 用戶 ID
+        provider: 提供商（'gemini' 或 'openai'）
+        default_model: 如果用戶沒有選擇模型，返回的預設模型（如果為 None，則返回 None）
+    
+    Returns:
+        用戶選擇的模型名稱，如果沒有則返回 default_model，如果 default_model 為 None 則返回 None
+    """
+    if not user_id:
+        return default_model
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        database_url = os.getenv("DATABASE_URL")
+        use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+        
+        if use_postgresql:
+            cursor.execute(
+                "SELECT model_name FROM user_llm_keys WHERE user_id = %s AND provider = %s",
+                (user_id, provider)
+            )
+        else:
+            cursor.execute(
+                "SELECT model_name FROM user_llm_keys WHERE user_id = ? AND provider = ?",
+                (user_id, provider)
+            )
+        
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        if row and row[0]:
+            # 用戶有選擇模型，返回用戶選擇的模型
+            return row[0]
+        else:
+            # 用戶沒有選擇模型，返回預設模型
+            return default_model
+    
+    except Exception as e:
+        error_msg = str(e) if e else "未知錯誤"
+        error_type = type(e).__name__
+        print(f"ERROR: 獲取用戶 LLM 模型失敗 - 類型: {error_type}, 訊息: {error_msg}")
+        # 發生錯誤時，返回預設模型以確保功能正常
+        return default_model
+
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse, HTMLResponse, Response, PlainTextResponse
@@ -602,12 +653,43 @@ def init_database():
             provider TEXT NOT NULL,
             encrypted_key TEXT NOT NULL,
             last4 TEXT,
+            model_name TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES user_profiles (user_id),
             UNIQUE(user_id, provider)
         )
     """)
+    
+    # 為現有的 user_llm_keys 表添加 model_name 欄位（如果不存在）
+    try:
+        if use_postgresql:
+            # PostgreSQL: 先檢查欄位是否存在
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='user_llm_keys' AND column_name='model_name'
+            """)
+            if not cursor.fetchone():
+                cursor.execute("ALTER TABLE user_llm_keys ADD COLUMN model_name TEXT")
+                print("INFO: 已新增 model_name 欄位到 user_llm_keys 表 (PostgreSQL)")
+            else:
+                print("INFO: model_name 欄位已存在 (PostgreSQL)")
+        else:
+            # SQLite 不支援 IF NOT EXISTS，需要先檢查
+            cursor.execute("PRAGMA table_info(user_llm_keys)")
+            columns = [row[1] for row in cursor.fetchall()]
+            if 'model_name' not in columns:
+                cursor.execute("ALTER TABLE user_llm_keys ADD COLUMN model_name TEXT")
+                print("INFO: 已新增 model_name 欄位到 user_llm_keys 表 (SQLite)")
+            else:
+                print("INFO: model_name 欄位已存在 (SQLite)")
+    except Exception as e:
+        error_str = str(e).lower()
+        if "duplicate column" in error_str or "already exists" in error_str or "no such column" in error_str:
+            print("INFO: model_name 欄位已存在或表格不存在，跳過新增")
+        else:
+            print(f"WARNING: 無法新增 model_name 欄位: {e}")
     
     # 創建 IP 人設規劃結果表
     execute_sql("""
@@ -2794,6 +2876,11 @@ def create_app() -> FastAPI:
             logger.error("Missing GEMINI_API_KEY in .env for generate_positioning")
             return JSONResponse({"error": "服務器配置錯誤，請聯繫管理員"}, status_code=500)
 
+        # 獲取用戶選擇的模型（如果有的話），否則使用系統預設
+        user_model = get_user_llm_model(user_id, "gemini", default_model=model_name) if user_id else model_name
+        # 確保使用有效的模型名稱
+        effective_model = user_model or model_name
+
         # 驗證用戶 ID（如果提供）
         if user_id and not validate_user_id(user_id):
             logger.warning(f"無效的用戶 ID: {user_id}")
@@ -2843,7 +2930,7 @@ def create_app() -> FastAPI:
             genai.configure(api_key=api_key)
 
             model_obj = genai.GenerativeModel(
-                model_name=model_name,
+                model_name=effective_model,
                 system_instruction=system_text
             )
             chat = model_obj.start_chat(history=user_history)
@@ -2899,6 +2986,11 @@ def create_app() -> FastAPI:
             logger.error("Missing GEMINI_API_KEY in .env for generate_topics")
             return JSONResponse({"error": "服務器配置錯誤，請聯繫管理員"}, status_code=500)
 
+        # 獲取用戶選擇的模型（如果有的話），否則使用系統預設
+        user_model = get_user_llm_model(user_id, "gemini", default_model=model_name) if user_id else model_name
+        # 確保使用有效的模型名稱
+        effective_model = user_model or model_name
+
         # 驗證用戶 ID（如果提供）
         if user_id and not validate_user_id(user_id):
             logger.warning(f"無效的用戶 ID: {user_id}")
@@ -2948,7 +3040,7 @@ def create_app() -> FastAPI:
             genai.configure(api_key=api_key)
 
             model_obj = genai.GenerativeModel(
-                model_name=model_name,
+                model_name=effective_model,
                 system_instruction=system_text
             )
             chat = model_obj.start_chat(history=user_history)
@@ -3001,6 +3093,11 @@ def create_app() -> FastAPI:
         
         if not api_key:
             return JSONResponse({"error": "Missing GEMINI_API_KEY in .env"}, status_code=500)
+
+        # 獲取用戶選擇的模型（如果有的話），否則使用系統預設
+        user_model = get_user_llm_model(user_id, "gemini", default_model=model_name) if user_id else model_name
+        # 確保使用有效的模型名稱
+        effective_model = user_model or model_name
 
         # 根據選擇的結構生成對應的提示詞
         script_structure = getattr(body, 'script_structure', None) or 'A'  # 預設為 A
@@ -3180,7 +3277,7 @@ def create_app() -> FastAPI:
             genai.configure(api_key=api_key)
 
             model_obj = genai.GenerativeModel(
-                model_name=model_name,
+                model_name=effective_model,
                 system_instruction=system_text
             )
             chat = model_obj.start_chat(history=user_history)
@@ -3357,7 +3454,12 @@ def create_app() -> FastAPI:
         # 使用用戶的 API Key 或系統預設的
         genai.configure(api_key=api_key)
 
-        model = genai.GenerativeModel(model_name)
+        # 獲取用戶選擇的模型（如果有的話），否則使用系統預設
+        user_model = get_user_llm_model(user_id, "gemini", default_model=model_name) if user_id else model_name
+        # 確保使用有效的模型名稱
+        effective_model = user_model or model_name
+
+        model = genai.GenerativeModel(effective_model)
         chat = model.start_chat(history=[
             {"role": "user", "parts": system_text},
             *user_history,
@@ -5121,6 +5223,31 @@ def create_app() -> FastAPI:
                     """, (user_id,))
                 script_count = cursor.fetchone()[0]
                 
+                # 獲取 LLM Key 綁定狀態
+                if use_postgresql:
+                    cursor.execute("""
+                        SELECT provider, model_name, created_at, updated_at 
+                        FROM user_llm_keys 
+                        WHERE user_id = %s
+                        ORDER BY updated_at DESC
+                    """, (user_id,))
+                else:
+                    cursor.execute("""
+                        SELECT provider, model_name, created_at, updated_at 
+                        FROM user_llm_keys 
+                        WHERE user_id = ?
+                        ORDER BY updated_at DESC
+                    """, (user_id,))
+                
+                llm_keys = []
+                for llm_row in cursor.fetchall():
+                    llm_keys.append({
+                        "provider": llm_row[0],
+                        "model_name": llm_row[1] if llm_row[1] else "系統預設",
+                        "created_at": llm_row[2].isoformat() if llm_row[2] else None,
+                        "updated_at": llm_row[3].isoformat() if llm_row[3] else None
+                    })
+                
                 # 格式化日期（台灣時區 UTC+8）
                 created_at = row[5]
                 if created_at:
@@ -5156,7 +5283,9 @@ def create_app() -> FastAPI:
                     "preferred_style": row[8],
                     "preferred_duration": row[9],
                     "conversation_count": conversation_count,
-                    "script_count": script_count
+                    "script_count": script_count,
+                    "llm_keys": llm_keys,  # 新增：LLM Key 綁定狀態
+                    "has_llm_key": len(llm_keys) > 0  # 新增：是否有綁定 LLM Key
                 })
             
             conn.close()
@@ -11539,6 +11668,7 @@ ReelMind 系統自動發送
             user_id = body.get("user_id")
             provider = body.get("provider", "gemini")  # 'gemini' or 'openai'
             api_key = body.get("api_key")
+            model_name = body.get("model_name")  # 新增：用戶選擇的模型名稱（可選）
             
             if not user_id:
                 return JSONResponse({"error": "缺少 user_id"}, status_code=400)
@@ -11560,6 +11690,14 @@ ReelMind 系統自動發送
             if not validate_api_key(api_key, provider):
                 return JSONResponse({"error": "API Key 格式無效"}, status_code=400)
             
+            # 驗證模型名稱（如果提供）
+            if model_name:
+                # 驗證模型名稱格式（只允許字母、數字、連字號、底線、點）
+                if not re.match(r'^[A-Za-z0-9._-]+$', model_name):
+                    return JSONResponse({"error": "模型名稱格式無效"}, status_code=400)
+                if len(model_name) > 100:
+                    return JSONResponse({"error": "模型名稱過長（最多 100 字符）"}, status_code=400)
+            
             # 加密 API Key
             encrypted_key = encrypt_api_key(api_key)
             
@@ -11575,19 +11713,20 @@ ReelMind 系統自動發送
             
             if use_postgresql:
                 cursor.execute("""
-                    INSERT INTO user_llm_keys (user_id, provider, encrypted_key, last4, updated_at)
-                    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    INSERT INTO user_llm_keys (user_id, provider, encrypted_key, last4, model_name, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                     ON CONFLICT (user_id, provider) 
                     DO UPDATE SET encrypted_key = EXCLUDED.encrypted_key, 
                                   last4 = EXCLUDED.last4, 
+                                  model_name = EXCLUDED.model_name,
                                   updated_at = CURRENT_TIMESTAMP
-                """, (user_id, provider, encrypted_key, last4))
+                """, (user_id, provider, encrypted_key, last4, model_name))
             else:
                 cursor.execute("""
                     INSERT OR REPLACE INTO user_llm_keys 
-                    (user_id, provider, encrypted_key, last4, updated_at)
-                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """, (user_id, provider, encrypted_key, last4))
+                    (user_id, provider, encrypted_key, last4, model_name, updated_at)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (user_id, provider, encrypted_key, last4, model_name))
             
             conn.commit()
             cursor.close()
@@ -11613,6 +11752,65 @@ ReelMind 系統自動發送
             # 返回通用錯誤信息
             return JSONResponse({"error": "服務器錯誤，請稍後再試"}, status_code=500)
     
+    @app.get("/api/llm/models")
+    async def get_available_models():
+        """獲取可用的 LLM 模型列表（公開端點，無需認證）"""
+        return {
+            "gemini": [
+                {"value": "", "label": "使用系統預設 (gemini-2.5-flash)"},
+                {"value": "gemini-2.0-flash-exp", "label": "Gemini 2.0 Flash (實驗版)"},
+                {"value": "gemini-2.5-flash", "label": "Gemini 2.5 Flash"},
+                {"value": "gemini-1.5-pro", "label": "Gemini 1.5 Pro"},
+                {"value": "gemini-1.5-flash", "label": "Gemini 1.5 Flash"},
+                {"value": "gemini-1.5-pro-latest", "label": "Gemini 1.5 Pro (最新版)"},
+                {"value": "gemini-1.5-flash-latest", "label": "Gemini 1.5 Flash (最新版)"}
+            ],
+            "openai": [
+                {"value": "", "label": "使用系統預設"},
+                {"value": "gpt-4o", "label": "GPT-4o"},
+                {"value": "gpt-4-turbo", "label": "GPT-4 Turbo"},
+                {"value": "gpt-4", "label": "GPT-4"},
+                {"value": "gpt-3.5-turbo", "label": "GPT-3.5 Turbo"},
+                {"value": "gpt-4o-mini", "label": "GPT-4o Mini"}
+            ]
+        }
+    
+    @app.get("/api/user/llm-keys/check")
+    async def check_user_llm_key(current_user_id: Optional[str] = Depends(get_current_user)):
+        """檢查當前用戶是否已綁定 LLM Key（用於前端通知）"""
+        if not current_user_id:
+            return {"has_key": False, "provider": None}
+        
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            database_url = os.getenv("DATABASE_URL")
+            use_postgresql = database_url and "postgresql://" in database_url and PSYCOPG2_AVAILABLE
+            
+            if use_postgresql:
+                cursor.execute(
+                    "SELECT provider FROM user_llm_keys WHERE user_id = %s LIMIT 1",
+                    (current_user_id,)
+                )
+            else:
+                cursor.execute(
+                    "SELECT provider FROM user_llm_keys WHERE user_id = ? LIMIT 1",
+                    (current_user_id,)
+                )
+            
+            row = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            
+            if row:
+                return {"has_key": True, "provider": row[0]}
+            else:
+                return {"has_key": False, "provider": None}
+        except Exception as e:
+            logger.error(f"檢查用戶 LLM Key 失敗: {e}", exc_info=True)
+            return {"has_key": False, "provider": None, "error": str(e)}
+    
     @app.get("/api/user/llm-keys/{user_id}")
     async def get_llm_keys(user_id: str, current_user_id: Optional[str] = Depends(get_current_user)):
         """獲取用戶已保存的 LLM Keys（只返回 last4，不返回完整金鑰）"""
@@ -11631,12 +11829,12 @@ ReelMind 系統自動發送
             
             if use_postgresql:
                 cursor.execute(
-                    "SELECT provider, last4, created_at, updated_at FROM user_llm_keys WHERE user_id = %s",
+                    "SELECT provider, last4, model_name, created_at, updated_at FROM user_llm_keys WHERE user_id = %s",
                     (user_id,)
                 )
             else:
                 cursor.execute(
-                    "SELECT provider, last4, created_at, updated_at FROM user_llm_keys WHERE user_id = ?",
+                    "SELECT provider, last4, model_name, created_at, updated_at FROM user_llm_keys WHERE user_id = ?",
                     (user_id,)
                 )
             
@@ -11645,8 +11843,9 @@ ReelMind 系統自動發送
                 keys.append({
                     "provider": row[0],
                     "last4": row[1],
-                    "created_at": row[2].isoformat() if row[2] else None,
-                    "updated_at": row[3].isoformat() if row[3] else None
+                    "model_name": row[2] if len(row) > 2 else None,  # 向後兼容：如果欄位不存在則為 None
+                    "created_at": row[3].isoformat() if len(row) > 3 and row[3] else None,
+                    "updated_at": row[4].isoformat() if len(row) > 4 and row[4] else None
                 })
             
             cursor.close()
