@@ -2836,15 +2836,39 @@ def create_app() -> FastAPI:
             gemini_configured = bool(os.getenv("GEMINI_API_KEY"))
             
             # 測試 Gemini API 連線（如果已配置）
+            # 使用較長的超時時間（10秒）並添加超時處理
             gemini_test_result = "not_configured"
             if gemini_configured:
                 try:
+                    import asyncio
                     model = genai.GenerativeModel(model_name)
-                    # 簡單測試呼叫
-                    response = model.generate_content("test", request_options={"timeout": 5})
-                    gemini_test_result = "working" if response else "failed"
+                    # 使用 asyncio.wait_for 來控制超時，避免阻塞太久
+                    try:
+                        # 在異步環境中執行同步調用，並設置超時
+                        loop = asyncio.get_event_loop()
+                        response = await asyncio.wait_for(
+                            loop.run_in_executor(
+                                None,
+                                lambda: model.generate_content("test", request_options={"timeout": 10})
+                            ),
+                            timeout=12.0  # 總超時時間 12 秒（比 request_options 的 10 秒稍長）
+                        )
+                        gemini_test_result = "working" if response else "failed"
+                    except asyncio.TimeoutError:
+                        gemini_test_result = "error: 504 The request timed out. Please try again."
+                    except Exception as e:
+                        # 檢查是否為超時錯誤
+                        error_str = str(e).lower()
+                        if "timeout" in error_str or "504" in error_str or "timed out" in error_str:
+                            gemini_test_result = "error: 504 The request timed out. Please try again."
+                        else:
+                            gemini_test_result = f"error: {str(e)}"
                 except Exception as e:
-                    gemini_test_result = f"error: {str(e)}"
+                    error_str = str(e).lower()
+                    if "timeout" in error_str or "504" in error_str or "timed out" in error_str:
+                        gemini_test_result = "error: 504 The request timed out. Please try again."
+                    else:
+                        gemini_test_result = f"error: {str(e)}"
             
             return {
                 "status": "ok",
