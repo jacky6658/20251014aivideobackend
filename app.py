@@ -6522,9 +6522,23 @@ def create_app() -> FastAPI:
                 count = cursor.fetchone()[0]
                 weekly_activity.append(count)
             
+            # 統計綁定 LLM Key 的用戶數
+            if use_postgresql:
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT user_id)
+                    FROM user_llm_keys
+                """)
+            else:
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT user_id)
+                    FROM user_llm_keys
+                """)
+            llm_key_users_count = cursor.fetchone()[0] or 0
+            
             conn.close()
             
             return {
+                "llm_key_users_count": llm_key_users_count,  # 新增：綁定 LLM Key 的用戶數
                 "platform": {
                     "labels": platform_labels,
                     "data": platform_data
