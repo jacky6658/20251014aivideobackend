@@ -2740,6 +2740,7 @@ def create_app() -> FastAPI:
             "/api/admin/auth/login",  # 管理員登入端點（用戶尚未登入，無法獲取 CSRF Token）
             "/api/payment/webhook",  # ECPay Webhook（使用簽章驗證）
             "/api/payment/return-url",  # ECPay ReturnURL（伺服器端通知，使用簽章驗證）
+            "/api/payment/result",  # ECPay OrderResultURL（用戶返回頁，支援 GET/POST）
             "/api/webhook/verify-license",  # n8n Webhook（使用 secret 驗證）
             "/api/cron/check-renewals",  # 定時任務端點（使用 CRON_SECRET 驗證）
             "/api/generate/positioning",  # 公開生成端點（帳號定位）
@@ -8007,7 +8008,8 @@ def create_app() -> FastAPI:
             
             # 構建完整的 URL（確保不截斷）
             return_url_full = f"{backend_base_url}/api/payment/return-url"
-            order_result_url_full = f"{return_url_base}?order_id={trade_no}"
+            # OrderResultURL 改為指向後端端點，由後端處理後重定向到前端（避免 405 錯誤）
+            order_result_url_full = f"{backend_base_url}/api/payment/result?order_id={trade_no}"
             
             # 立即驗證 URL 完整性
             logger.info(f"[ECPay URL構建] backend_base_url={backend_base_url} (長度: {len(backend_base_url)})")
@@ -8781,6 +8783,82 @@ def create_app() -> FastAPI:
         except Exception as e:
             logger.error(f"[ECPay RETURN-URL] 處理失敗: {e}", exc_info=True)
             return PlainTextResponse("0|FAIL")
+    
+    @app.get("/api/payment/result")
+    @app.post("/api/payment/result")
+    async def payment_result_redirect(request: Request):
+        """處理綠界付款結果返回（支援 GET 和 POST），然後重定向到前端頁面
+        
+        這個端點用於處理綠界的 OrderResultURL，無論綠界使用 GET 還是 POST，
+        都能正常處理並重定向到前端 payment-result.html 頁面。
+        """
+        try:
+            # 獲取參數（支援 GET 和 POST）
+            if request.method == "POST":
+                # POST 請求：嘗試從 form 獲取，如果失敗則從 body 獲取
+                try:
+                    form = await request.form()
+                    params = dict(form.items())
+                except Exception:
+                    # 如果 form 解析失敗，嘗試從 body 獲取（可能是 form-urlencoded）
+                    body = await request.body()
+                    if body:
+                        from urllib.parse import parse_qs, unquote_plus
+                        params_str = body.decode('utf-8')
+                        params_dict = parse_qs(params_str, keep_blank_values=True)
+                        params = {k: unquote_plus(v[0]) if v else '' for k, v in params_dict.items()}
+                    else:
+                        params = {}
+            else:
+                # GET 請求：從 query 參數獲取
+                params = dict(request.query_params)
+            
+            logger.info(f"[ECPay RESULT] 收到 {request.method} 請求，參數: {params}")
+            
+            # 提取訂單編號（支援多種參數名稱）
+            merchant_trade_no = (
+                params.get("MerchantTradeNo") or 
+                params.get("order_id") or 
+                params.get("orderId") or
+                params.get("MerchantTradeNo")
+            )
+            rtn_code = params.get("RtnCode") or params.get("status")
+            rtn_msg = params.get("RtnMsg") or params.get("message")
+            payment_type = params.get("PaymentType")
+            
+            # 構建重定向 URL（前端頁面）
+            frontend_url = os.getenv("ECPAY_RETURN_URL", "https://reelmind.aijob.com.tw/payment-result.html")
+            
+            # 構建查詢參數（使用 URL 編碼）
+            from urllib.parse import urlencode
+            query_params = {}
+            if merchant_trade_no:
+                query_params["order_id"] = merchant_trade_no
+            if rtn_code:
+                query_params["status"] = rtn_code
+            if rtn_msg:
+                query_params["message"] = rtn_msg
+            if payment_type:
+                query_params["PaymentType"] = payment_type
+            
+            # 構建完整的重定向 URL
+            if query_params:
+                redirect_url = f"{frontend_url}?{urlencode(query_params)}"
+            else:
+                redirect_url = frontend_url
+            
+            logger.info(f"[ECPay RESULT] 重定向到: {redirect_url}")
+            
+            # 重定向到前端頁面
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(url=redirect_url, status_code=302)
+            
+        except Exception as e:
+            logger.error(f"[ECPay RESULT] 處理失敗: {e}", exc_info=True)
+            # 即使出錯，也重定向到前端頁面（讓前端處理錯誤顯示）
+            frontend_url = os.getenv("ECPAY_RETURN_URL", "https://reelmind.aijob.com.tw/payment-result.html")
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(url=frontend_url, status_code=302)
     
     @app.get("/api/payment/return")
     async def ecpay_return(request: Request):
