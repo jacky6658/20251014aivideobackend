@@ -2657,12 +2657,17 @@ def create_app() -> FastAPI:
             "/api/generate/script",  # 公開生成端點（短影音腳本）
             "/api/chat/stream",  # 公開聊天端點（AI 顧問）
             "/api/test/email",  # 測試 Email 端點（用於測試 SMTP 設定）
+            "/api/admin/",  # 所有管理員端點（管理員端點已有認證保護，不需要 CSRF）
         ]
         
         # 檢查是否為需要 CSRF 保護的請求
         if request.method in ["POST", "PUT", "DELETE", "PATCH"]:
             # 排除不需要 CSRF 保護的端點
             if any(request.url.path.startswith(path) for path in excluded_paths):
+                return await call_next(request)
+            
+            # 管理員端點（/api/admin/*）已有認證保護，不需要 CSRF Token
+            if request.url.path.startswith("/api/admin/"):
                 return await call_next(request)
             
             # 獲取 CSRF Token（從 Header 或 Query 參數）
@@ -9136,7 +9141,10 @@ def create_app() -> FastAPI:
                     (activation_id,)
                 )
             
-            if not use_postgresql:
+            # 確保資料庫變更已提交
+            if use_postgresql:
+                conn.commit()
+            else:
                 conn.commit()
             cursor.close()
             conn.close()
